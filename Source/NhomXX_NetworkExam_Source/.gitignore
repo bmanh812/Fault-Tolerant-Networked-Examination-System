@@ -1,0 +1,14 @@
+target/
+.idea/
+.vscode/
+*.iml
+*.log
+data/*.db
+data/*.db-shm
+data/*.db-wal
+!data/network_exam.db
+results/raw/*.csv
+results/processed/*.csv
+!results/raw/.gitkeep
+!results/processed/.gitkeep
+
