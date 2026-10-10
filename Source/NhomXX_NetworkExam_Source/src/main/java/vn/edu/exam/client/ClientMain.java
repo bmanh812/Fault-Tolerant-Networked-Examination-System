@@ -10,12 +10,16 @@ public final class ClientMain {
 
     public static void main(String[] args) throws Exception {
         AppConfig config = AppConfig.load(Path.of("config", "application.properties"));
+        ClientTransportConfig transportConfig = ClientTransportConfig.from(config);
         System.out.printf(
-                "MCQ Client skeleton ready for %s:%d%n",
+                "MCQ Client transport ready for %s:%d (connect=%dms, read=%dms, request=%dms)%n",
                 config.get("client.serverHost"),
-                config.getInt("client.serverPort")
+                config.getInt("client.serverPort"),
+                transportConfig.connectTimeoutMs(),
+                transportConfig.socketReadTimeoutMs(),
+                transportConfig.requestTimeoutMs()
         );
-        System.out.println("Next P0 step: implement JOIN_EXAM request/EXAM_STATE response flow.");
+        System.out.println("JOIN_EXAM business flow is intentionally not started in this phase.");
     }
 }
 
