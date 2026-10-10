@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class FrameCodecTest {
     @Test
-    void roundTripsUnicodeJson() throws Exception {
-        String json = "{\"message\":\"Xin chào thí sinh\"}";
+    void roundTripsUtf8Json() throws Exception {
+        String json = "{\"message\":\"Đã lưu đáp án\"}";
         ByteArrayOutputStream output = new ByteArrayOutputStream();
 
         FrameCodec.writeFrame(output, json, 65_536);
@@ -23,20 +23,10 @@ class FrameCodecTest {
     }
 
     @Test
-    void rejectsFrameOverConfiguredLimit() throws Exception {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        FrameCodec.writeFrame(output, "12345", 10);
-
-        assertThrows(IOException.class,
-                () -> FrameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()), 4));
-    }
-
-    @Test
-    void readsFrameWhenTcpDataArrivesInSmallChunks() throws Exception {
-        String json = "{\"type\":\"PING\",\"message\":\"du lieu bi chia nho\"}";
+    void readsDataArrivingInSmallChunks() throws Exception {
+        String json = "{\"type\":\"ANSWER_UPDATE\"}";
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         FrameCodec.writeFrame(output, json, 65_536);
-
         InputStream chunked = new FilterInputStream(new ByteArrayInputStream(output.toByteArray())) {
             @Override
             public int read(byte[] buffer, int offset, int length) throws IOException {
@@ -48,14 +38,25 @@ class FrameCodecTest {
     }
 
     @Test
-    void readsConsecutiveFramesFromOneTcpStream() throws Exception {
+    void readsConsecutiveFrames() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        FrameCodec.writeFrame(output, "{\"seq\":1}", 65_536);
-        FrameCodec.writeFrame(output, "{\"seq\":2}", 65_536);
+        FrameCodec.writeFrame(output, "{\"version\":1}", 65_536);
+        FrameCodec.writeFrame(output, "{\"version\":2}", 65_536);
         ByteArrayInputStream input = new ByteArrayInputStream(output.toByteArray());
 
-        assertEquals("{\"seq\":1}", FrameCodec.readFrame(input, 65_536));
-        assertEquals("{\"seq\":2}", FrameCodec.readFrame(input, 65_536));
+        assertEquals("{\"version\":1}", FrameCodec.readFrame(input, 65_536));
+        assertEquals("{\"version\":2}", FrameCodec.readFrame(input, 65_536));
+    }
+
+    @Test
+    void rejectsFrameOverLimit() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        FrameCodec.writeFrame(output, "12345", 10);
+
+        assertThrows(
+                IOException.class,
+                () -> FrameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()), 4)
+        );
     }
 }
 

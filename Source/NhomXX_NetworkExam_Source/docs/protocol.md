@@ -2,58 +2,77 @@
 
 ## Framing
 
-Mỗi message gồm:
-
 ```text
 [4-byte signed big-endian body length][UTF-8 JSON body]
 ```
 
-Body không vượt quá 65536 byte. TCP là byte stream nên implementation phải hỗ trợ partial read và nhiều frame trong cùng một lần read.
+Quy tắc:
+
+- `0 < body length <= 65536`.
+- Phải đọc đủ header và body vì TCP là byte stream.
+- Hỗ trợ partial read và nhiều frame liên tiếp.
 
 ## Envelope
 
 ```json
 {
   "type": "ANSWER_UPDATE",
-  "version": 1,
+  "protocolVersion": 1,
   "requestId": "uuid",
-  "sessionId": "uuid-or-null",
   "sentAt": 1790800000000,
   "payload": {}
 }
 ```
 
+Response sử dụng lại `requestId` của request khi có quan hệ request-response.
+
 ## Message catalog
 
-- `PING`, `PONG`: kiểm tra kết nối trong giai đoạn dựng skeleton.
-- `LOGIN_REQ`, `LOGIN_RESP`
-- `JOIN_REQ`, `JOIN_RESP`
-- `ANSWER_UPDATE`, `ANSWER_ACK`
-- `RESUME_REQ`, `RESUME_STATE`
-- `HEARTBEAT`, `HEARTBEAT_ACK`
-- `SUBMIT_REQ`, `SUBMIT_ACK`
-- `ERROR`
+| Message | Direction | Payload chính |
+|---|---|---|
+| JOIN_EXAM | C to S | candidateId, examId |
+| EXAM_STATE | S to C | sessionId, questions, answers, deadline, serverTime, status |
+| ANSWER_UPDATE | C to S | sessionId, questionId, version, selectedOptionId |
+| ANSWER_ACK | S to C | sessionId, questionId, confirmedVersion, selectedOptionId, serverTime |
+| RECONNECT | C to S | sessionId, candidateId, knownVersions |
+| RESYNC_STATE | S to C | sessionId, answers, deadline, status, serverTime |
+| SUBMIT | C to S | sessionId |
+| SUBMIT_ACK | S to C | sessionId, status, submittedAt |
+| AUTO_SUBMIT | S to C | sessionId, status, submittedAt |
+| HEARTBEAT | C to S | sessionId, clientTime; P1 |
+| HEARTBEAT_ACK | S to C | serverTime, deadline; P1 |
+| ERROR | S to C | code, message, optional currentAnswer |
 
-## Sequence và idempotency
+## Answer version invariant
 
-- `lastCommittedSeq` bắt đầu từ 0.
-- Request mới hợp lệ khi `seq = lastCommittedSeq + 1`.
-- Cùng `requestId` và cùng payload trả lại response đã lưu.
-- Cùng sequence nhưng payload khác trả `CONFLICT_DUPLICATE`.
-- Sequence nhảy cóc trả `OUT_OF_SYNC` và `expectedSeq`.
-- Client MVP chỉ có một answer update đang chờ ACK.
+- Version được quản lý theo từng `(sessionId, questionId)`.
+- Lựa chọn đầu tiên dùng version `1`.
+- `incomingVersion > currentVersion`: persist snapshot rồi ACK.
+- Cùng version và cùng option: duplicate an toàn, trả lại ACK/current state.
+- Cùng version nhưng khác option hoặc version thấp hơn: không overwrite, trả `VERSION_STALE` cùng state hiện tại.
+- Socket `write()` thành công không đồng nghĩa answer đã được lưu.
 
-## Error codes
+## Example ANSWER_UPDATE
 
-- `INVALID_REQUEST`
-- `FRAME_TOO_LARGE`
-- `UNSUPPORTED_VERSION`
-- `AUTH_FAILED`
-- `SESSION_NOT_FOUND`
-- `OUT_OF_SYNC`
-- `CONFLICT_DUPLICATE`
-- `EXAM_CLOSED`
-- `DB_ERROR`
-- `SERVER_BUSY`
-- `INTERNAL_ERROR`
+```json
+{
+  "type": "ANSWER_UPDATE",
+  "protocolVersion": 1,
+  "requestId": "4e0cd3ae-b734-4d73-85de-5204b2623414",
+  "sentAt": 1790800000000,
+  "payload": {
+    "sessionId": "session-001",
+    "questionId": "Q12",
+    "version": 5,
+    "selectedOptionId": "Q12-C"
+  }
+}
+```
+
+## Reconnect reconciliation
+
+- RESYNC_STATE là authoritative state.
+- Nếu Server có version bằng hoặc lớn hơn pending local version, Client coi snapshot đó đã an toàn.
+- Nếu Server còn version cũ, Client có thể gửi lại pending snapshot mới nhất khi session còn ACTIVE và chưa qua deadline.
+- Reconnect không reset deadline.
 

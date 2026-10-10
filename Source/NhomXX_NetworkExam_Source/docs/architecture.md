@@ -1,31 +1,45 @@
-# Kiến trúc phiên bản MVP
+# Architecture
+
+## Scope
+
+Hệ thống chỉ xử lý bài thi MCQ một lựa chọn. Server là nguồn sự thật cho session, answer version, deadline và trạng thái submit.
+
+## Components
 
 ```text
-Exam Client CLI
-  - ProtocolIO
-  - Local pending request
-  - Reconnect controller
-          |
-          | TCP persistent connection
-          | 4-byte length + UTF-8 JSON
-          v
-Exam Server
-  - Connection handler pool
-  - Protocol dispatcher
-  - Session service
-  - Answer synchronization service
-  - Deadline scheduler
-          |
-          | JDBC transaction
-          v
-SQLite
+Candidate Client A ---- TCP length-prefix JSON ----+
+Candidate Client B ---- TCP length-prefix JSON ----+---- Exam Server
+Candidate Client N ---- TCP length-prefix JSON ----+       |
+                                                          +-- ClientHandler
+                                                          +-- SessionService
+                                                          +-- AnswerService
+                                                          +-- DeadlineScheduler
+                                                          +-- H2 Repository
 ```
 
-## Nguyên tắc
+## Client responsibilities
 
-- Server là nguồn chân lý cho deadline, session state, committed sequence và câu trả lời.
-- ACK chỉ được gửi sau khi database commit thành công.
-- Mỗi session chỉ có một connection generation hợp lệ tại một thời điểm.
-- Ghi dữ liệu ra cùng một socket phải được tuần tự hóa.
-- `ANSWER_UPDATE`, `SUBMIT` và `AUTO_SUBMIT` của cùng session dùng chung per-session lock.
+- Hiển thị MCQ, deadline và trạng thái chưa xác nhận/đã lưu.
+- Duy trì `localVersion` và `confirmedVersion` theo từng câu hỏi.
+- Chỉ đánh dấu đã lưu sau ACK hoặc RESYNC xác nhận.
+- Giữ pending snapshot cho tới khi Server xác nhận.
+- Reconnect và resync trước khi gửi tiếp dữ liệu.
+
+## Server responsibilities
+
+- Dùng bounded executor để xử lý nhiều connection.
+- Cô lập dữ liệu theo `sessionId`.
+- Persist answer mới hơn trước khi gửi ACK.
+- Không overwrite answer bởi duplicate hoặc stale version.
+- Dùng transaction hoặc per-session lock cho update/submit.
+- Quản lý deadline và auto-submit độc lập với kết nối Client.
+
+## Module boundaries
+
+- `common.protocol`: framing, envelope, DTO và error code.
+- `client`: socket, local state, ACK tracking và reconnect state machine.
+- `server`: accept loop, message dispatch và error isolation.
+- `server.service`: nghiệp vụ session/answer/submit.
+- `server.persistence`: H2 connection, schema và repository implementation.
+- `server.timer`: deadline scheduler.
 

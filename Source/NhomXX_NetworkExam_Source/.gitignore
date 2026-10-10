@@ -3,12 +3,11 @@ target/
 .vscode/
 *.iml
 *.log
-data/*.db
-data/*.db-shm
-data/*.db-wal
-!data/network_exam.db
+data/*.mv.db
+data/*.trace.db
 results/raw/*.csv
-results/processed/*.csv
+results/raw/*.log
+results/processed/*
 !results/raw/.gitkeep
 !results/processed/.gitkeep
 

@@ -23,7 +23,7 @@ public final class AppConfig {
 
     public String get(String key) {
         String value = properties.getProperty(key);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             throw new IllegalArgumentException("Missing configuration key: " + key);
         }
         return value.trim();
@@ -31,6 +31,10 @@ public final class AppConfig {
 
     public int getInt(String key) {
         return Integer.parseInt(get(key));
+    }
+
+    public boolean getBoolean(String key) {
+        return Boolean.parseBoolean(get(key));
     }
 }
 

@@ -5,16 +5,17 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>vn.edu.exam</groupId>
-    <artifactId>network-exam</artifactId>
+    <artifactId>mcq-network-exam</artifactId>
     <version>0.1.0-SNAPSHOT</version>
-    <name>Fault-Tolerant Networked Examination System</name>
+    <name>Networked MCQ Examination System</name>
 
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <junit.version>5.11.0</junit.version>
         <jackson.version>2.17.2</jackson.version>
+        <h2.version>2.4.240</h2.version>
         <slf4j.version>2.0.16</slf4j.version>
+        <junit.version>5.11.0</junit.version>
     </properties>
 
     <dependencies>
@@ -24,9 +25,9 @@
             <version>${jackson.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>3.46.1.0</version>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>${h2.version}</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>

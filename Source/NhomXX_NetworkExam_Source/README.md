@@ -1,109 +1,80 @@
-# Fault-Tolerant Networked Examination System
+# Networked MCQ Examination System
 
-Khung project cho bài tập lớn Lập trình mạng, Chủ đề 3 - Ứng dụng mạng. Hệ thống hướng tới đồng bộ câu trả lời có ACK/sequence number, phục hồi phiên sau mất kết nối và auto-submit theo thời gian do server quản lý.
+Bộ khung mới cho đề tài hệ thống thi trắc nghiệm qua mạng có autosave và phục hồi phiên sau khi mất kết nối.
+
+## Phạm vi đã khóa
+
+- Chỉ hỗ trợ câu hỏi trắc nghiệm một lựa chọn.
+- TCP connection dài hạn với framing `4-byte big-endian length + UTF-8 JSON`.
+- Mỗi câu trả lời có `version` riêng và chỉ được coi là đã lưu sau `ANSWER_ACK` hoặc `RESYNC_STATE`.
+- Server giữ authoritative state, deadline và thực hiện manual/auto-submit.
+- Reconnect lấy lại state từ Server; Client không tự suy đoán trạng thái đã lưu.
+- Nhiều Client được phục vụ bằng bounded thread pool và state được cô lập theo session.
+- Heartbeat, dashboard và phục hồi sau Server restart là P1, không chặn P0.
 
 ## Trạng thái hiện tại
 
-- Maven project Java 17.
-- TCP server dùng worker thread pool.
-- TCP client kiểm tra kết nối bằng `PING/PONG`.
-- Framing 4-byte big-endian length + UTF-8 JSON.
-- SQLite schema và dữ liệu mẫu.
-- Unit test cho framing và database schema.
-- Các handler nghiệp vụ login/join/answer/resume/submit chưa được triển khai.
+Đây là bộ khung có thể build và test, chưa phải chương trình hoàn chỉnh. Các lớp protocol, framing, state model, database schema, module boundary và test nền đã có; handler nghiệp vụ JOIN/ANSWER/RESYNC/SUBMIT vẫn cần triển khai theo từng phase.
 
 ## Công nghệ
 
 - Java 17
 - Maven
-- TCP Socket
+- Java TCP Socket
 - Jackson JSON
-- JDBC + SQLite
-- JUnit 5
+- H2 file mode
 - SLF4J + Logback
+- JUnit 5
 
 ## Cấu trúc
 
 ```text
-config/                  Cấu hình server, protocol, heartbeat và database
-data/                    Schema, seed data và file SQLite
+config/                  Cấu hình Server, Client, protocol và database
+data/                    H2 schema và dữ liệu demo
 docs/                    Architecture, protocol và test plan
-results/                 Raw/processed CSV cho experiment
-scripts/                 Lệnh hỗ trợ chạy server/client
-src/main/java/           Mã nguồn
-src/test/java/           Test
-statics/                 Hình architecture/protocol/results về sau
+results/                 Raw/processed experiment outputs
+scripts/                 Lệnh chạy trên PowerShell
+src/main/java/
+  vn/edu/exam/common/    Config và protocol dùng chung
+  vn/edu/exam/client/    Client state, connection và local answer state
+  vn/edu/exam/server/    Server, handler, session, answer, timer, repository
+src/test/java/           Unit test cho framing, protocol, version và schema
 ```
-
-## Database
-
-Database mẫu nằm tại `data/network_exam.db` và được tạo từ:
-
-- `data/schema.sql`
-- `data/sample-data.sql`
-
-Các nhóm bảng chính:
-
-- Danh mục: `candidate`, `exam`, `question`, `exam_candidate`.
-- Runtime: `exam_session`, `answer_current`, `submission`.
-- Reliability: `processed_request`, `answer_event`.
-- Audit: `session_event`.
-
-Ba tài khoản demo là `candidate01`, `candidate02`, `candidate03`. Trường password hiện chỉ là placeholder và phải được thay bằng password hash thật khi triển khai login.
 
 ## Build và test
 
-Yêu cầu `java -version` phải là Java 17 trở lên. Trên máy hiện tại, Java mặc định đang là Java 8 nhưng có JDK 25 tại `C:\Program Files\Java\jdk-25`. Có thể chọn JDK tương thích cho terminal hiện tại bằng:
+Yêu cầu JDK 17 trở lên.
 
 ```powershell
-$env:JAVA_HOME='C:\Program Files\Java\jdk-25'
-$env:Path="$env:JAVA_HOME\bin;$env:Path"
-java -version
+mvn.cmd test
 ```
 
-Project vẫn được compile với `--release 17`, do đó bytecode đầu ra tương thích Java 17.
+Khởi tạo database:
 
 ```powershell
-mvn clean test
+mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.server.persistence.DatabaseInitMain"
 ```
 
-## Chạy server
+Chạy Server:
 
 ```powershell
-mvn compile exec:java '-Dexec.mainClass=vn.edu.exam.server.ServerMain'
+mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.server.ServerMain"
 ```
 
-## Chạy client kiểm tra
-
-Mở terminal khác:
+Chạy Client:
 
 ```powershell
-mvn compile exec:java '-Dexec.mainClass=vn.edu.exam.client.ClientMain'
+mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.client.ClientMain"
 ```
 
-Client sẽ gửi `PING` và nhận `PONG`. Đây là gate đầu tiên trước khi triển khai LOGIN/JOIN.
+## Thứ tự triển khai P0
 
-## Việc cần làm tiếp theo
-
-1. Điền số nhóm và thông tin thành viên.
-2. Thay password placeholder bằng hash demo thật.
-3. Implement `LOGIN_REQ/LOGIN_RESP`.
-4. Implement `JOIN_REQ/JOIN_RESP`.
-5. Implement transaction `ANSWER_UPDATE/ANSWER_ACK`.
-6. Thêm request deduplication và sequence validation.
-7. Implement reconnect bằng `RESUME_REQ/RESUME_STATE`.
-8. Implement deadline scheduler và auto-submit.
-9. Hoàn thiện integration test và experiment CSV.
-
-## Đóng gói nộp bài
-
-Thay `NhomXX` bằng số nhóm chính thức. Cấu trúc cuối:
-
-```text
-NhomXX_NetworkExam/
-├── Source/
-│   └── NhomXX_NetworkExam_Source/
-└── Report/
-    └── NhomXX_NetworkExam_Report.docx
-```
+1. Freeze protocol và state/version rules.
+2. JOIN_EXAM và EXAM_STATE.
+3. ANSWER_UPDATE, persistence rồi ANSWER_ACK.
+4. Duplicate/stale version handling.
+5. SUBMIT, Server deadline và AUTO_SUBMIT.
+6. RECONNECT và RESYNC_STATE.
+7. Integration tests T01-T12 và concurrent-client runner.
+8. Experiment, raw CSV/log, report và clean-machine test.
 

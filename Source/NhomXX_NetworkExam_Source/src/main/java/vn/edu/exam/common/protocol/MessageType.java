@@ -1,20 +1,17 @@
 package vn.edu.exam.common.protocol;
 
 public enum MessageType {
-    PING,
-    PONG,
-    LOGIN_REQ,
-    LOGIN_RESP,
-    JOIN_REQ,
-    JOIN_RESP,
+    JOIN_EXAM,
+    EXAM_STATE,
     ANSWER_UPDATE,
     ANSWER_ACK,
-    RESUME_REQ,
-    RESUME_STATE,
+    RECONNECT,
+    RESYNC_STATE,
+    SUBMIT,
+    SUBMIT_ACK,
+    AUTO_SUBMIT,
     HEARTBEAT,
     HEARTBEAT_ACK,
-    SUBMIT_REQ,
-    SUBMIT_ACK,
     ERROR
 }
 

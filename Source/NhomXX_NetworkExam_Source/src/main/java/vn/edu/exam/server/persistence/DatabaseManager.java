@@ -1,7 +1,5 @@
 package vn.edu.exam.server.persistence;
 
-import vn.edu.exam.common.config.AppConfig;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,26 +9,40 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 public final class DatabaseManager {
-    private final String databaseUrl;
-    private final int busyTimeoutMs;
+    private final String url;
+    private final String user;
+    private final String password;
 
-    public DatabaseManager(AppConfig config) {
-        this.databaseUrl = config.get("database.url");
-        this.busyTimeoutMs = config.getInt("database.busyTimeoutMs");
+    public DatabaseManager(String url, String user, String password) {
+        this.url = url;
+        this.user = user;
+        this.password = password;
     }
 
     public Connection open() throws SQLException {
-        Connection connection = DriverManager.getConnection(databaseUrl);
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA foreign_keys = ON");
-            statement.execute("PRAGMA busy_timeout = " + busyTimeoutMs);
-        }
-        return connection;
+        return DriverManager.getConnection(url, user, password);
     }
 
-    public void initialize(Path schemaPath) throws SQLException, IOException {
-        try (Connection connection = open()) {
-            SqlScriptRunner.run(connection, Files.readString(schemaPath));
+    public void initialize(Path schemaPath) throws IOException, SQLException {
+        executeScript(schemaPath);
+    }
+
+    public void seed(Path seedPath) throws IOException, SQLException {
+        executeScript(seedPath);
+    }
+
+    private void executeScript(Path path) throws IOException, SQLException {
+        String sql = Files.readString(path);
+        try (Connection connection = open(); Statement statement = connection.createStatement()) {
+            for (String command : sql.split(";")) {
+                String normalized = command.lines()
+                        .filter(line -> !line.stripLeading().startsWith("--"))
+                        .reduce("", (left, right) -> left + System.lineSeparator() + right)
+                        .trim();
+                if (!normalized.isEmpty()) {
+                    statement.execute(normalized);
+                }
+            }
         }
     }
 }

@@ -8,12 +8,13 @@ import java.util.UUID;
 
 public record ProtocolMessage(
         MessageType type,
-        int version,
+        int protocolVersion,
         String requestId,
-        String sessionId,
         long sentAt,
         Map<String, Object> payload
 ) {
+    public static final int VERSION_1 = 1;
+
     public ProtocolMessage {
         payload = payload == null
                 ? Map.of()
@@ -21,15 +22,10 @@ public record ProtocolMessage(
     }
 
     public static ProtocolMessage request(MessageType type, Map<String, Object> payload) {
-        return request(type, null, payload);
-    }
-
-    public static ProtocolMessage request(MessageType type, String sessionId, Map<String, Object> payload) {
         return new ProtocolMessage(
                 type,
-                1,
+                VERSION_1,
                 UUID.randomUUID().toString(),
-                sessionId,
                 Instant.now().toEpochMilli(),
                 payload
         );
@@ -38,14 +34,12 @@ public record ProtocolMessage(
     public static ProtocolMessage response(
             MessageType type,
             ProtocolMessage request,
-            String sessionId,
             Map<String, Object> payload
     ) {
         return new ProtocolMessage(
                 type,
-                request.version(),
+                request.protocolVersion(),
                 request.requestId(),
-                sessionId,
                 Instant.now().toEpochMilli(),
                 payload
         );

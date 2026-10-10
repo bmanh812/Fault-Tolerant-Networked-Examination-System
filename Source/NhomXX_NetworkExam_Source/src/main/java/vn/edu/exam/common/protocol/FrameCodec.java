@@ -12,7 +12,7 @@ public final class FrameCodec {
     private FrameCodec() {
     }
 
-    public static String readFrame(InputStream input, int maxFrameBytes) throws IOException {
+    public static String readFrame(InputStream input, int maxMessageBytes) throws IOException {
         int first = input.read();
         if (first == -1) {
             return null;
@@ -22,8 +22,8 @@ public final class FrameCodec {
         header[0] = (byte) first;
         readFully(input, header, 1, 3);
         int length = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN).getInt();
-        if (length <= 0 || length > maxFrameBytes) {
-            throw new IOException("Invalid frame length: " + length);
+        if (length <= 0 || length > maxMessageBytes) {
+            throw new IOException("Invalid message length: " + length);
         }
 
         byte[] body = new byte[length];
@@ -31,10 +31,10 @@ public final class FrameCodec {
         return new String(body, StandardCharsets.UTF_8);
     }
 
-    public static void writeFrame(OutputStream output, String json, int maxFrameBytes) throws IOException {
+    public static void writeFrame(OutputStream output, String json, int maxMessageBytes) throws IOException {
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
-        if (body.length == 0 || body.length > maxFrameBytes) {
-            throw new IOException("Invalid frame length: " + body.length);
+        if (body.length == 0 || body.length > maxMessageBytes) {
+            throw new IOException("Invalid message length: " + body.length);
         }
         output.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(body.length).array());
         output.write(body);
@@ -46,7 +46,7 @@ public final class FrameCodec {
         while (total < length) {
             int read = input.read(target, offset + total, length - total);
             if (read == -1) {
-                throw new EOFException("Connection closed in the middle of a frame");
+                throw new EOFException("Connection closed in the middle of a message");
             }
             total += read;
         }

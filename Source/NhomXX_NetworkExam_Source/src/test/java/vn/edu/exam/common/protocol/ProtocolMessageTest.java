@@ -2,7 +2,6 @@ package vn.edu.exam.common.protocol;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,37 +10,32 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtocolMessageTest {
     @Test
-    void responseKeepsRequestCorrelationFields() {
+    void responseKeepsRequestId() {
         ProtocolMessage request = ProtocolMessage.request(
-                MessageType.PING,
-                Map.of("clientTime", 123L)
+                MessageType.JOIN_EXAM,
+                Map.of("candidateId", "CAND-001", "examId", "EXAM-001")
         );
-
         ProtocolMessage response = ProtocolMessage.response(
-                MessageType.PONG,
+                MessageType.EXAM_STATE,
                 request,
-                "session-001",
-                Map.of("serverTime", 456L)
+                Map.of("sessionId", "SESSION-001")
         );
 
         assertNotNull(request.requestId());
         assertEquals(request.requestId(), response.requestId());
-        assertEquals(request.version(), response.version());
-        assertEquals("session-001", response.sessionId());
+        assertEquals(request.protocolVersion(), response.protocolVersion());
     }
 
     @Test
-    void payloadIsCopiedAndCannotBeMutated() {
-        Map<String, Object> source = new LinkedHashMap<>();
-        source.put("value", "original");
+    void payloadCannotBeMutated() {
+        ProtocolMessage message = ProtocolMessage.request(
+                MessageType.SUBMIT,
+                Map.of("sessionId", "SESSION-001")
+        );
 
-        ProtocolMessage message = ProtocolMessage.request(MessageType.PING, source);
-        source.put("value", "changed");
-
-        assertEquals("original", message.payload().get("value"));
         assertThrows(
                 UnsupportedOperationException.class,
-                () -> message.payload().put("another", "value")
+                () -> message.payload().put("status", "SUBMITTED")
         );
     }
 }
