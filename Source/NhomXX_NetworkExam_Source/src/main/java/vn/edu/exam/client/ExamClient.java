@@ -150,6 +150,32 @@ public final class ExamClient implements AutoCloseable {
         );
     }
 
+    public CompletableFuture<ClientExamState.Snapshot> joinExam(String candidateId, String examId) {
+        ProtocolMessage request = createJoinRequest(candidateId, examId);
+        ProtocolValidator.validateClientMessage(request);
+        synchronized (lifecycleLock) {
+            if (!state.compareAndSet(ClientState.CONNECTED, ClientState.JOINING)) {
+                throw new IllegalStateException("Client must be connected before joining an exam");
+            }
+        }
+
+        CompletableFuture<ProtocolMessage> responseFuture;
+        try {
+            responseFuture = sendRequest(request);
+        } catch (RuntimeException error) {
+            restoreConnectedAfterJoinFailure();
+            throw error;
+        }
+
+        return responseFuture
+                .thenApply(response -> applyJoinResponse(request, examId, response))
+                .whenComplete((snapshot, error) -> {
+                    if (error != null) {
+                        restoreConnectedAfterJoinFailure();
+                    }
+                });
+    }
+
     public ClientState state() {
         return state.get();
     }
@@ -224,6 +250,58 @@ public final class ExamClient implements AutoCloseable {
         } catch (RuntimeException error) {
             pending.future().completeExceptionally(error);
         }
+    }
+
+    private ClientExamState.Snapshot applyJoinResponse(
+            ProtocolMessage request,
+            String requestedExamId,
+            ProtocolMessage response
+    ) {
+        ProtocolValidator.validateResponseTo(request, response);
+        if (response.type() == MessageType.ERROR) {
+            Payloads.ErrorResponse error = PayloadCodec.fromMap(
+                    response.payload(),
+                    Payloads.ErrorResponse.class
+            );
+            throw joinFailure(error);
+        }
+
+        Payloads.ExamState received = PayloadCodec.fromMap(
+                response.payload(),
+                Payloads.ExamState.class
+        );
+        if (!requestedExamId.equals(received.examId())) {
+            throw new IllegalArgumentException("EXAM_STATE examId does not match JOIN_EXAM request");
+        }
+
+        synchronized (lifecycleLock) {
+            if (state.get() != ClientState.JOINING) {
+                throw new CancellationException("JOIN_EXAM was cancelled before EXAM_STATE was applied");
+            }
+            examState.applyExamState(received);
+            state.set(ClientState.ACTIVE);
+            return examState.snapshot();
+        }
+    }
+
+    private void restoreConnectedAfterJoinFailure() {
+        synchronized (lifecycleLock) {
+            state.compareAndSet(ClientState.JOINING, ClientState.CONNECTED);
+        }
+    }
+
+    private static ExamJoinException joinFailure(Payloads.ErrorResponse error) {
+        String summary = switch (error.code()) {
+            case CANDIDATE_NOT_ALLOWED -> "Candidate is not allowed to join this exam";
+            case EXAM_NOT_STARTED -> "Exam has not started";
+            case EXAM_ENDED -> "Exam has ended";
+            case SERVER_BUSY -> "Server is busy; try again later";
+            default -> "JOIN_EXAM failed";
+        };
+        return new ExamJoinException(
+                error.code(),
+                summary + ": " + error.message()
+        );
     }
 
     private void timeoutRequest(String requestId) {
