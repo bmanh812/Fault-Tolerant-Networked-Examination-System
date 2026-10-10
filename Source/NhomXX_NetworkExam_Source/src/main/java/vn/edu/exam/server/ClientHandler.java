@@ -37,7 +37,7 @@ final class ClientHandler implements Runnable {
             );
             ProtocolMessage request;
             while ((request = protocol.read()) != null) {
-                ProtocolValidator.validateEnvelope(request);
+                ProtocolValidator.validateClientMessage(request);
                 protocol.write(notImplemented(request));
             }
         } catch (IllegalArgumentException error) {

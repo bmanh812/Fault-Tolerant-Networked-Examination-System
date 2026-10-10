@@ -1,24 +1,22 @@
 package vn.edu.exam.common.protocol;
 
-import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 public record ProtocolMessage(
         MessageType type,
         int protocolVersion,
         String requestId,
-        long sentAt,
         Map<String, Object> payload
 ) {
     public static final int VERSION_1 = 1;
 
     public ProtocolMessage {
-        payload = payload == null
-                ? Map.of()
-                : Collections.unmodifiableMap(new LinkedHashMap<>(payload));
+        Objects.requireNonNull(payload, "payload is required");
+        payload = Collections.unmodifiableMap(new LinkedHashMap<>(payload));
     }
 
     public static ProtocolMessage request(MessageType type, Map<String, Object> payload) {
@@ -26,7 +24,6 @@ public record ProtocolMessage(
                 type,
                 VERSION_1,
                 UUID.randomUUID().toString(),
-                Instant.now().toEpochMilli(),
                 payload
         );
     }
@@ -40,9 +37,15 @@ public record ProtocolMessage(
                 type,
                 request.protocolVersion(),
                 request.requestId(),
-                Instant.now().toEpochMilli(),
                 payload
         );
+    }
+
+    public static ProtocolMessage push(MessageType type, Map<String, Object> payload) {
+        if (type != MessageType.AUTO_SUBMIT) {
+            throw new IllegalArgumentException("AUTO_SUBMIT is the only server-push message in protocol v1");
+        }
+        return request(type, payload);
     }
 }
 

@@ -18,7 +18,7 @@ public final class ProtocolIO {
         this.output = output;
         this.maxMessageBytes = maxMessageBytes;
         this.mapper = new ObjectMapper()
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true);
     }
 
     public ProtocolMessage read() throws IOException {

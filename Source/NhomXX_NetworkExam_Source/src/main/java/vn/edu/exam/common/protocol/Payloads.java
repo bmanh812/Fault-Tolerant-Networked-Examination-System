@@ -75,6 +75,9 @@ public final class Payloads {
     public record SubmitAck(String sessionId, String status, long submittedAt) {
     }
 
+    public record AutoSubmit(String sessionId, String status, long submittedAt) {
+    }
+
     public record Heartbeat(String sessionId, long clientTime) {
     }
 
