@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS exam_session (
     FOREIGN KEY (exam_id) REFERENCES exam(exam_id),
     FOREIGN KEY (candidate_id) REFERENCES candidate(candidate_id),
     UNIQUE (exam_id, candidate_id),
-    CHECK (status IN ('NEW', 'ACTIVE', 'SUBMITTED', 'AUTO_SUBMITTED'))
+    CHECK (REGEXP_LIKE(status, '^(NEW|ACTIVE|SUBMITTED|AUTO_SUBMITTED)$'))
 );
 
 CREATE TABLE IF NOT EXISTS answer (
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS submission (
     submit_type VARCHAR(16) NOT NULL,
     score DOUBLE PRECISION,
     FOREIGN KEY (session_id) REFERENCES exam_session(session_id) ON DELETE CASCADE,
-    CHECK (submit_type IN ('MANUAL', 'AUTO'))
+    CHECK (REGEXP_LIKE(submit_type, '^(MANUAL|AUTO)$'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_question_exam ON question(exam_id, position_no);

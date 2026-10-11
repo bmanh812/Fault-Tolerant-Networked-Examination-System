@@ -34,6 +34,13 @@ Candidate Client N ---- TCP length-prefix JSON ----+       |
 - Dùng transaction hoặc per-session lock cho update/submit.
 - Quản lý deadline và auto-submit độc lập với kết nối Client.
 
+## Submission và deadline hiện tại
+
+- `ANSWER_UPDATE`, manual `SUBMIT` và `AUTO_SUBMIT` khóa cùng hàng `exam_session` trong H2 transaction. Deadline được kiểm tra sau khi lấy khóa; chỉ một thao tác có thể thay đổi state tại một thời điểm.
+- Manual submit cập nhật `exam_session` và thêm đúng một hàng `submission` trong cùng transaction. Request lặp trả `SUBMIT_ACK` với `submittedAt` ban đầu. Nếu đã hết giờ, Server ghi auto-submit và trả lỗi `EXAM_ENDED` cho `SUBMIT`.
+- Khi Server khởi động, nó quét các session `ACTIVE` đã quá hạn. Sau đó quét mỗi giây; session vừa JOIN còn được hẹn chạy tại deadline. Cả hai đường đều dùng cùng thao tác auto-submit idempotent.
+- Sau commit auto-submit, Server gửi `AUTO_SUBMIT` tới các connection đang gắn với session. Việc gửi thông báo qua hàng đợi riêng để một socket chậm không chặn timer và các session khác. Client offline lấy trạng thái cuối qua luồng resync khi được triển khai.
+
 ## Module boundaries
 
 - `common.protocol`: framing, envelope, DTO và error code.

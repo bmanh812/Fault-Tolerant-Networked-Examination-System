@@ -14,7 +14,7 @@ Bộ khung mới cho đề tài hệ thống thi trắc nghiệm qua mạng có 
 
 ## Trạng thái hiện tại
 
-Đây là bộ khung có thể build và test, chưa phải chương trình hoàn chỉnh. Các lớp protocol, framing, state model, database schema, module boundary và test nền đã có; handler nghiệp vụ JOIN/ANSWER/RESYNC/SUBMIT vẫn cần triển khai theo từng phase.
+Protocol v1, framing, state model và database schema đã có. Server xử lý `JOIN_EXAM`, `ANSWER_UPDATE` và `SUBMIT`: tạo hoặc lấy lại session đang hoạt động, trả đề MCQ, kiểm tra question/option/version, commit đáp án trước `ANSWER_ACK`, và ghi manual submission trước `SUBMIT_ACK`. Nộp lặp trả lại cùng trạng thái và thời điểm nộp. Server tự nộp session quá hạn bằng lịch hẹn và quét định kỳ, kể cả khi Client offline; Client đang kết nối nhận `AUTO_SUBMIT`. Client CLI hiện tham gia và hiển thị đề; các luồng answer/submit được kiểm tra qua TCP integration test. `RECONNECT/RESYNC_STATE` vẫn cần triển khai.
 
 ## Công nghệ
 
@@ -55,6 +55,8 @@ Khởi tạo database:
 mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.server.persistence.DatabaseInitMain"
 ```
 
+Lệnh khởi tạo tạo ba thí sinh `CAND-001` đến `CAND-003` và kỳ thi `EXAM-001` có ba câu MCQ. Thời gian bắt đầu/kết thúc của dữ liệu demo được tính lúc khởi tạo; hãy chạy lại lệnh này nếu kỳ thi demo đã hết giờ.
+
 Chạy Server:
 
 ```powershell
@@ -67,13 +69,15 @@ Chạy Client:
 mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.client.ClientMain"
 ```
 
+Nhập `CAND-001` và `EXAM-001` khi Client hỏi. Trong bản hiện tại, CLI chỉ hiển thị đề; `ANSWER_UPDATE` đã hoạt động ở Server và được kiểm tra trong test tích hợp.
+
 ## Thứ tự triển khai P0
 
 1. Freeze protocol và state/version rules.
-2. JOIN_EXAM và EXAM_STATE.
-3. ANSWER_UPDATE, persistence rồi ANSWER_ACK.
-4. Duplicate/stale version handling.
-5. SUBMIT, Server deadline và AUTO_SUBMIT.
+2. JOIN_EXAM và EXAM_STATE. Đã triển khai ở Server và Client.
+3. ANSWER_UPDATE, persistence rồi ANSWER_ACK. Đã triển khai ở Server.
+4. Duplicate/stale version handling. Đã triển khai ở Server.
+5. SUBMIT, Server deadline và AUTO_SUBMIT. Đã triển khai ở Server.
 6. RECONNECT và RESYNC_STATE.
 7. Integration tests T01-T12 và concurrent-client runner.
 8. Experiment, raw CSV/log, report và clean-machine test.
