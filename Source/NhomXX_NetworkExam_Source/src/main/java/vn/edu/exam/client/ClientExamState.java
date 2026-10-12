@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 public final class ClientExamState {
     private Snapshot current = Snapshot.empty();
@@ -51,6 +52,46 @@ public final class ClientExamState {
 
     public synchronized List<Question> questions() {
         return current.questions();
+    }
+
+    public synchronized AnswerDraft selectAnswer(String questionId, String optionId) {
+        AnswerDraft answer = requireAnswer(questionId);
+        requireOption(questionId, optionId);
+        AnswerDraft updated = answer.select(optionId);
+        if (updated != answer) {
+            replaceAnswer(questionId, updated);
+        }
+        return updated;
+    }
+
+    public synchronized AnswerDraft.UpdateSnapshot prepareAnswerUpdate(String questionId) {
+        return prepareAnswerUpdate(questionId, UUID.randomUUID().toString());
+    }
+
+    public synchronized AnswerDraft.UpdateSnapshot prepareAnswerUpdate(String questionId, String requestId) {
+        String sessionId = requireText(current.sessionId(), "sessionId");
+        AnswerDraft prepared = requireAnswer(questionId).prepareUpdate(sessionId, requestId);
+        replaceAnswer(questionId, prepared);
+        return prepared.pendingSnapshot();
+    }
+
+    public synchronized AnswerDraft.UpdateSnapshot retryAnswerUpdate(String questionId) {
+        return requireAnswer(questionId).retrySnapshot();
+    }
+
+    public synchronized AnswerDraft acknowledgeAnswer(AnswerDraft.UpdateSnapshot acknowledgedSnapshot) {
+        Objects.requireNonNull(acknowledgedSnapshot, "acknowledgedSnapshot is required");
+        if (!Objects.equals(current.sessionId(), acknowledgedSnapshot.sessionId())) {
+            throw new IllegalArgumentException("ACK snapshot belongs to another session");
+        }
+        AnswerDraft updated = requireAnswer(acknowledgedSnapshot.questionId())
+                .acknowledge(acknowledgedSnapshot);
+        replaceAnswer(acknowledgedSnapshot.questionId(), updated);
+        return updated;
+    }
+
+    public synchronized AnswerDraft answer(String questionId) {
+        return requireAnswer(questionId);
     }
 
     private static Snapshot prepare(Payloads.ExamState examState) {
@@ -119,7 +160,7 @@ public final class ClientExamState {
                     options
             ));
             optionIdsByQuestion.put(questionId, optionIds);
-            answers.put(questionId, new AnswerDraft(questionId, 0, 0, null, null));
+            answers.put(questionId, AnswerDraft.unanswered(questionId));
         }
 
         for (Map.Entry<String, Payloads.AnswerView> entry : examState.answers().entrySet()) {
@@ -142,12 +183,10 @@ public final class ClientExamState {
             if (!validOptions.contains(selectedOptionId)) {
                 throw new IllegalArgumentException("Answer option does not belong to question " + questionId);
             }
-            answers.put(questionId, new AnswerDraft(
+            answers.put(questionId, AnswerDraft.confirmed(
                     questionId,
                     sourceAnswer.version(),
-                    sourceAnswer.version(),
-                    selectedOptionId,
-                    null
+                    selectedOptionId
             ));
         }
 
@@ -169,6 +208,41 @@ public final class ClientExamState {
             throw new IllegalArgumentException(field + " must be a non-blank string");
         }
         return value;
+    }
+
+    private AnswerDraft requireAnswer(String questionId) {
+        requireText(questionId, "questionId");
+        AnswerDraft answer = current.answers().get(questionId);
+        if (answer == null) {
+            throw new IllegalArgumentException("Unknown questionId: " + questionId);
+        }
+        return answer;
+    }
+
+    private void requireOption(String questionId, String optionId) {
+        requireText(optionId, "optionId");
+        boolean exists = current.questions().stream()
+                .filter(question -> question.questionId().equals(questionId))
+                .flatMap(question -> question.options().stream())
+                .anyMatch(option -> option.optionId().equals(optionId));
+        if (!exists) {
+            throw new IllegalArgumentException("Option does not belong to question " + questionId);
+        }
+    }
+
+    private void replaceAnswer(String questionId, AnswerDraft answer) {
+        Map<String, AnswerDraft> answers = new LinkedHashMap<>(current.answers());
+        answers.put(questionId, answer);
+        current = new Snapshot(
+                current.sessionId(),
+                current.examId(),
+                current.title(),
+                current.sessionStatus(),
+                current.deadline(),
+                current.serverTime(),
+                current.questions(),
+                answers
+        );
     }
 
     public record Option(String optionId, String label, String text) {

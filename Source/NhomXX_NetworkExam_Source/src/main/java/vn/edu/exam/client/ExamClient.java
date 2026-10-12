@@ -184,6 +184,30 @@ public final class ExamClient implements AutoCloseable {
         return examState;
     }
 
+    public AnswerDraft selectAnswer(String questionId, String optionId) {
+        synchronized (lifecycleLock) {
+            requireActiveExam();
+            return examState.selectAnswer(questionId, optionId);
+        }
+    }
+
+    /**
+     * Prepares local immutable data for a future ANSWER_UPDATE. Phase 4 does not send it.
+     */
+    public AnswerDraft.UpdateSnapshot prepareAnswerUpdate(String questionId) {
+        synchronized (lifecycleLock) {
+            requireActiveExam();
+            return examState.prepareAnswerUpdate(questionId);
+        }
+    }
+
+    public AnswerDraft.UpdateSnapshot retryAnswerUpdate(String questionId) {
+        synchronized (lifecycleLock) {
+            requireActiveExam();
+            return examState.retryAnswerUpdate(questionId);
+        }
+    }
+
     int pendingRequestCount() {
         return pendingRequests.size();
     }
@@ -340,6 +364,12 @@ public final class ExamClient implements AutoCloseable {
             throw new IllegalStateException("Client is not connected");
         }
         return current;
+    }
+
+    private void requireActiveExam() {
+        if (state.get() != ClientState.ACTIVE) {
+            throw new IllegalStateException("Client must have an active exam");
+        }
     }
 
     private void terminateTransport(ProtocolTransport failedTransport, Throwable error) {

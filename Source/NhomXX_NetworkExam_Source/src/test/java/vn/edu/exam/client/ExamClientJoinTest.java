@@ -135,6 +135,29 @@ class ExamClientJoinTest {
         }
     }
 
+    @Test
+    void localAnswerPreparationDoesNotSendANetworkRequest() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        try (ExamClient client = connectedClient(transport, 1_000)) {
+            CompletableFuture<ClientExamState.Snapshot> joined = client.joinExam("CAND-001", "EXAM-001");
+            ProtocolMessage joinRequest = transport.takeWritten();
+            transport.receive(examStateResponse(joinRequest, "EXAM-001"));
+            joined.get(1, TimeUnit.SECONDS);
+
+            AnswerDraft selected = client.selectAnswer("Q2", "Q2-A");
+            AnswerDraft.UpdateSnapshot prepared = client.prepareAnswerUpdate("Q2");
+            AnswerDraft.UpdateSnapshot retry = client.retryAnswerUpdate("Q2");
+
+            assertEquals(1, selected.localVersion());
+            assertEquals(prepared, retry);
+            assertEquals("SESSION-001", prepared.sessionId());
+            assertEquals("Q2", prepared.questionId());
+            assertEquals(1, prepared.version());
+            assertEquals("Q2-A", prepared.selectedOptionId());
+            assertNull(transport.takeWritten());
+        }
+    }
+
     private static ExamClient connectedClient(FakeTransport transport, int requestTimeoutMs) throws IOException {
         ExamClient client = new ExamClient(
                 new ClientTransportConfig(500, 100, requestTimeoutMs, 65_536),
