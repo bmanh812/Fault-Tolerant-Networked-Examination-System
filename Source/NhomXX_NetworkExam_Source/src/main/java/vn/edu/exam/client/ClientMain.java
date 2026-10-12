@@ -1,12 +1,15 @@
 package vn.edu.exam.client;
 
+import vn.edu.exam.client.ui.CoreExamClientGateway;
+import vn.edu.exam.client.ui.ExamUiController;
+import vn.edu.exam.client.ui.SwingExamFrame;
 import vn.edu.exam.common.config.AppConfig;
 
+import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
 import java.nio.file.Path;
-import java.time.Instant;
-import java.util.Scanner;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class ClientMain {
     private ClientMain() {
@@ -15,57 +18,44 @@ public final class ClientMain {
     public static void main(String[] args) throws Exception {
         AppConfig config = AppConfig.load(Path.of("config", "application.properties"));
         ClientTransportConfig transportConfig = ClientTransportConfig.from(config);
-        Scanner input = new Scanner(System.in);
-        String candidateId = readValue(args, 0, input, "Candidate ID: ");
-        String examId = readValue(args, 1, input, "Exam ID: ");
+        String defaultCandidateId = argument(args, 0);
+        String defaultExamId = argument(args, 1);
 
-        try (ExamClient client = new ExamClient(transportConfig)) {
-            client.connect(
+        SwingUtilities.invokeLater(() -> {
+            useSystemLookAndFeel();
+            ExamClient client = new ExamClient(transportConfig);
+            CoreExamClientGateway gateway = new CoreExamClientGateway(client);
+            ExecutorService networkExecutor = Executors.newSingleThreadExecutor(task -> {
+                Thread thread = new Thread(task, "exam-ui-network");
+                thread.setDaemon(true);
+                return thread;
+            });
+            SwingExamFrame frame = new SwingExamFrame(
                     config.get("client.serverHost"),
-                    config.getInt("client.serverPort")
+                    config.getInt("client.serverPort"),
+                    defaultCandidateId,
+                    defaultExamId
             );
-            ClientExamState.Snapshot exam = client.joinExam(candidateId, examId).get();
-            printExam(exam);
-        } catch (ExecutionException error) {
-            Throwable cause = error.getCause();
-            if (cause instanceof ExamJoinException joinError) {
-                System.err.printf("JOIN_EXAM failed [%s]: %s%n", joinError.errorCode(), joinError.getMessage());
-            } else if (cause instanceof TimeoutException) {
-                System.err.println("JOIN_EXAM timed out: Server did not respond in time");
-            } else {
-                System.err.println("JOIN_EXAM failed: " + cause.getMessage());
-            }
-        }
+            ExamUiController controller = new ExamUiController(
+                    gateway,
+                    frame,
+                    networkExecutor,
+                    SwingUtilities::invokeLater
+            );
+            frame.bind(controller);
+            frame.setVisible(true);
+        });
     }
 
-    private static String readValue(String[] args, int index, Scanner input, String prompt) {
-        if (args.length > index && !args[index].isBlank()) {
-            return args[index].trim();
-        }
-        System.out.print(prompt);
-        return input.nextLine().trim();
+    private static String argument(String[] args, int index) {
+        return args.length > index ? args[index].trim() : "";
     }
 
-    private static void printExam(ClientExamState.Snapshot exam) {
-        System.out.printf("%nJoined exam: %s (%s)%n", exam.title(), exam.examId());
-        System.out.println("Session: " + exam.sessionId());
-        System.out.println("Status: " + exam.sessionStatus());
-        System.out.println("Deadline: " + Instant.ofEpochMilli(exam.deadline()));
-        System.out.println("Server time: " + Instant.ofEpochMilli(exam.serverTime()));
-
-        for (ClientExamState.Question question : exam.questions()) {
-            System.out.printf("%n%d. %s%n", question.position(), question.text());
-            for (ClientExamState.Option option : question.options()) {
-                System.out.printf("   %s. %s%n", option.label(), option.text());
-            }
-            AnswerDraft answer = exam.answers().get(question.questionId());
-            if (answer != null && answer.selectedOptionId() != null) {
-                System.out.printf(
-                        "   Current answer: %s (confirmed version %d)%n",
-                        answer.selectedOptionId(),
-                        answer.confirmedVersion()
-                );
-            }
+    private static void useSystemLookAndFeel() {
+        try {
+            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        } catch (Exception ignored) {
+            // The cross-platform Swing look and feel is a safe fallback.
         }
     }
 }
