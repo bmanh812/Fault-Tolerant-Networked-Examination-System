@@ -1,6 +1,7 @@
 package vn.edu.exam.client;
 
 import vn.edu.exam.common.protocol.MessageType;
+import vn.edu.exam.common.protocol.ErrorCode;
 import vn.edu.exam.common.protocol.PayloadCodec;
 import vn.edu.exam.common.protocol.Payloads;
 import vn.edu.exam.common.protocol.ProtocolMessage;
@@ -9,7 +10,10 @@ import vn.edu.exam.common.protocol.ProtocolValidator;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static vn.edu.exam.common.protocol.MessageType.JOIN_EXAM;
+import static vn.edu.exam.common.protocol.MessageType.ANSWER_UPDATE;
 
 public final class ExamClient implements AutoCloseable {
     private final AtomicReference<ClientState> state = new AtomicReference<>(ClientState.DISCONNECTED);
@@ -32,6 +37,10 @@ public final class ExamClient implements AutoCloseable {
     private final ScheduledExecutorService timeoutScheduler;
     private final ConcurrentMap<String, PendingRequest> pendingRequests = new ConcurrentHashMap<>();
     private final Object lifecycleLock = new Object();
+    /** Guarded by lifecycleLock; one network request at a time for each question. */
+    private final Map<String, AnswerInFlight> answerUpdatesInFlight = new HashMap<>();
+    /** Guarded by lifecycleLock; retained for the reconnect/resync phase. */
+    private final Map<String, AnswerSyncIssue> answerSyncIssues = new HashMap<>();
 
     private volatile ProtocolTransport transport;
     private volatile Thread readerThread;
@@ -192,8 +201,45 @@ public final class ExamClient implements AutoCloseable {
     }
 
     /**
-     * Prepares local immutable data for a future ANSWER_UPDATE. Phase 4 does not send it.
+     * Selects an option locally and persists that logical change through ANSWER_UPDATE. If an older
+     * version for the question is already in flight, this call waits for it and then sends the
+     * newest required snapshot.
      */
+    public CompletableFuture<AnswerDraft> updateAnswer(String questionId, String optionId) {
+        int targetVersion;
+        synchronized (lifecycleLock) {
+            requireActiveExam();
+            targetVersion = examState.selectAnswer(questionId, optionId).localVersion();
+        }
+        return ensureAnswerConfirmed(questionId, targetVersion);
+    }
+
+    /**
+     * Sends the current unsaved answer. Calling this again after a timeout retries the immutable
+     * pending snapshot with the same requestId, version and selectedOptionId.
+     */
+    public CompletableFuture<AnswerDraft> sendAnswerUpdate(String questionId) {
+        int targetVersion;
+        synchronized (lifecycleLock) {
+            requireActiveExam();
+            targetVersion = examState.answer(questionId).localVersion();
+        }
+        return ensureAnswerConfirmed(questionId, targetVersion);
+    }
+
+    public Optional<AnswerSyncIssue> answerSyncIssue(String questionId) {
+        synchronized (lifecycleLock) {
+            return Optional.ofNullable(answerSyncIssues.get(questionId));
+        }
+    }
+
+    public boolean answerUpdateInFlight(String questionId) {
+        synchronized (lifecycleLock) {
+            return answerUpdatesInFlight.containsKey(questionId);
+        }
+    }
+
+    /** Prepares local immutable data without performing network I/O. */
     public AnswerDraft.UpdateSnapshot prepareAnswerUpdate(String questionId) {
         synchronized (lifecycleLock) {
             requireActiveExam();
@@ -206,6 +252,170 @@ public final class ExamClient implements AutoCloseable {
             requireActiveExam();
             return examState.retryAnswerUpdate(questionId);
         }
+    }
+
+    private CompletableFuture<AnswerDraft> ensureAnswerConfirmed(String questionId, int targetVersion) {
+        CompletableFuture<AnswerDraft> currentStep;
+        synchronized (lifecycleLock) {
+            if (state.get() != ClientState.ACTIVE) {
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("Client must have an active exam")
+                );
+            }
+
+            AnswerDraft answer = examState.answer(questionId);
+            if (answer.confirmedVersion() >= targetVersion) {
+                return CompletableFuture.completedFuture(answer);
+            }
+
+            AnswerSyncIssue syncIssue = answerSyncIssues.get(questionId);
+            if (syncIssue != null && syncIssue.requiresResync()) {
+                return CompletableFuture.failedFuture(new AnswerUpdateException(
+                        syncIssue.errorCode(),
+                        syncIssue.questionId(),
+                        syncIssue.message(),
+                        syncIssue.serverAnswer()
+                ));
+            }
+
+            AnswerInFlight inFlight = answerUpdatesInFlight.get(questionId);
+            if (inFlight == null) {
+                inFlight = startAnswerUpdateLocked(questionId, answer);
+            }
+            currentStep = inFlight.completion();
+        }
+
+        return currentStep.thenCompose(updated -> {
+            if (updated.confirmedVersion() >= targetVersion) {
+                return CompletableFuture.completedFuture(updated);
+            }
+            return ensureAnswerConfirmed(questionId, targetVersion);
+        });
+    }
+
+    private AnswerInFlight startAnswerUpdateLocked(String questionId, AnswerDraft answer) {
+        AnswerDraft.UpdateSnapshot pendingSnapshot = answer.pendingSnapshot();
+        final AnswerDraft.UpdateSnapshot snapshot = pendingSnapshot == null
+                ? examState.prepareAnswerUpdate(questionId)
+                : pendingSnapshot;
+
+        ProtocolMessage request = new ProtocolMessage(
+                ANSWER_UPDATE,
+                ProtocolMessage.VERSION_1,
+                snapshot.requestId(),
+                PayloadCodec.toMap(new Payloads.AnswerUpdate(
+                        snapshot.sessionId(),
+                        snapshot.questionId(),
+                        snapshot.version(),
+                        snapshot.selectedOptionId()
+                ))
+        );
+        ProtocolValidator.validateClientMessage(request);
+
+        CompletableFuture<AnswerDraft> completion = new CompletableFuture<>();
+        AnswerInFlight inFlight = new AnswerInFlight(snapshot, completion);
+        answerUpdatesInFlight.put(questionId, inFlight);
+
+        CompletableFuture<AnswerDraft> networkResult;
+        try {
+            networkResult = sendRequest(request).thenApply(response ->
+                    applyAnswerResponse(request, snapshot, response)
+            );
+        } catch (RuntimeException error) {
+            answerUpdatesInFlight.remove(questionId, inFlight);
+            completion.completeExceptionally(error);
+            return inFlight;
+        }
+
+        networkResult.whenComplete((updated, error) -> {
+            synchronized (lifecycleLock) {
+                answerUpdatesInFlight.remove(questionId, inFlight);
+            }
+            if (error == null) {
+                completion.complete(updated);
+            } else {
+                completion.completeExceptionally(unwrapCompletionFailure(error));
+            }
+        });
+        return inFlight;
+    }
+
+    private AnswerDraft applyAnswerResponse(
+            ProtocolMessage request,
+            AnswerDraft.UpdateSnapshot snapshot,
+            ProtocolMessage response
+    ) {
+        ProtocolValidator.validateResponseTo(request, response);
+        if (response.type() == MessageType.ERROR) {
+            Payloads.ErrorResponse error = PayloadCodec.fromMap(
+                    response.payload(), Payloads.ErrorResponse.class
+            );
+            validateAnswerError(snapshot, error);
+            AnswerUpdateException failure = new AnswerUpdateException(
+                    error.code(), snapshot.questionId(), error.message(), error.currentAnswer()
+            );
+            if (failure.requiresResync()) {
+                synchronized (lifecycleLock) {
+                    answerSyncIssues.put(snapshot.questionId(), new AnswerSyncIssue(
+                            error.code(), snapshot.questionId(), error.message(), error.currentAnswer()
+                    ));
+                }
+            }
+            throw failure;
+        }
+
+        Payloads.AnswerAck acknowledgement = PayloadCodec.fromMap(
+                response.payload(), Payloads.AnswerAck.class
+        );
+        validateAnswerAcknowledgement(snapshot, acknowledgement);
+        synchronized (lifecycleLock) {
+            if (!Objects.equals(examState.sessionId(), snapshot.sessionId())) {
+                throw new IllegalArgumentException("ANSWER_ACK belongs to another active session");
+            }
+            AnswerDraft updated = examState.acknowledgeAnswer(snapshot);
+            answerSyncIssues.remove(snapshot.questionId());
+            return updated;
+        }
+    }
+
+    private static void validateAnswerAcknowledgement(
+            AnswerDraft.UpdateSnapshot snapshot,
+            Payloads.AnswerAck acknowledgement
+    ) {
+        if (!snapshot.sessionId().equals(acknowledgement.sessionId())) {
+            throw new IllegalArgumentException("ANSWER_ACK sessionId does not match the request");
+        }
+        if (!snapshot.questionId().equals(acknowledgement.questionId())) {
+            throw new IllegalArgumentException("ANSWER_ACK questionId does not match the request");
+        }
+        if (snapshot.version() != acknowledgement.confirmedVersion()) {
+            throw new IllegalArgumentException("ANSWER_ACK confirmedVersion does not match the request");
+        }
+        if (!snapshot.selectedOptionId().equals(acknowledgement.selectedOptionId())) {
+            throw new IllegalArgumentException("ANSWER_ACK selectedOptionId does not match the request");
+        }
+    }
+
+    private static void validateAnswerError(
+            AnswerDraft.UpdateSnapshot snapshot,
+            Payloads.ErrorResponse error
+    ) {
+        if (error.code() != ErrorCode.VERSION_CONFLICT) {
+            return;
+        }
+        Payloads.AnswerView current = Objects.requireNonNull(
+                error.currentAnswer(), "VERSION_CONFLICT requires currentAnswer"
+        );
+        if (!snapshot.questionId().equals(current.questionId())) {
+            throw new IllegalArgumentException("VERSION_CONFLICT currentAnswer belongs to another question");
+        }
+    }
+
+    private static Throwable unwrapCompletionFailure(Throwable error) {
+        if (error instanceof java.util.concurrent.CompletionException && error.getCause() != null) {
+            return error.getCause();
+        }
+        return error;
     }
 
     int pendingRequestCount() {
@@ -303,6 +513,8 @@ public final class ExamClient implements AutoCloseable {
                 throw new CancellationException("JOIN_EXAM was cancelled before EXAM_STATE was applied");
             }
             examState.applyExamState(received);
+            answerUpdatesInFlight.clear();
+            answerSyncIssues.clear();
             state.set(ClientState.ACTIVE);
             return examState.snapshot();
         }
@@ -486,5 +698,11 @@ public final class ExamClient implements AutoCloseable {
                 task.cancel(false);
             }
         }
+    }
+
+    private record AnswerInFlight(
+            AnswerDraft.UpdateSnapshot snapshot,
+            CompletableFuture<AnswerDraft> completion
+    ) {
     }
 }

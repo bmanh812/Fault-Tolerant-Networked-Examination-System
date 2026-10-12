@@ -83,17 +83,23 @@ class AnswerDraftTest {
                 .select("Q1-A")
                 .prepareUpdate(SESSION_ID, REQUEST_1);
         AnswerDraft.UpdateSnapshot oldSnapshot = versionOne.pendingSnapshot();
-        AnswerDraft versionTwoPending = versionOne
+        AnswerDraft versionTwoWaiting = versionOne
                 .select("Q1-B")
                 .prepareUpdate(SESSION_ID, REQUEST_2);
 
-        AnswerDraft afterOldAck = versionTwoPending.acknowledge(oldSnapshot);
+        assertSame(oldSnapshot, versionTwoWaiting.pendingSnapshot());
+        AnswerDraft afterOldAck = versionTwoWaiting.acknowledge(oldSnapshot);
 
         assertEquals(2, afterOldAck.localVersion());
         assertEquals(1, afterOldAck.confirmedVersion());
         assertEquals("Q1-B", afterOldAck.selectedOptionId());
-        assertEquals(REQUEST_2, afterOldAck.pendingRequestId());
+        assertNull(afterOldAck.pendingSnapshot());
         assertFalse(afterOldAck.isSaved());
+        assertEquals(AnswerDraft.SaveStatus.PENDING, afterOldAck.saveStatus());
+
+        AnswerDraft versionTwoPending = afterOldAck.prepareUpdate(SESSION_ID, REQUEST_2);
+        assertEquals(REQUEST_2, versionTwoPending.pendingRequestId());
+        assertEquals(2, versionTwoPending.pendingSnapshot().version());
     }
 
     @Test
@@ -117,9 +123,9 @@ class AnswerDraftTest {
                 .select("Q1-A")
                 .prepareUpdate(SESSION_ID, REQUEST_1);
         AnswerDraft.UpdateSnapshot oldSnapshot = versionOne.pendingSnapshot();
-        AnswerDraft versionTwo = versionOne
-                .select("Q1-B")
-                .prepareUpdate(SESSION_ID, REQUEST_2);
+        AnswerDraft versionTwoWaiting = versionOne.select("Q1-B");
+        AnswerDraft afterVersionOneAck = versionTwoWaiting.acknowledge(oldSnapshot);
+        AnswerDraft versionTwo = afterVersionOneAck.prepareUpdate(SESSION_ID, REQUEST_2);
         AnswerDraft confirmedVersionTwo = versionTwo.acknowledge(versionTwo.pendingSnapshot());
 
         AnswerDraft afterStaleAck = confirmedVersionTwo.acknowledge(oldSnapshot);

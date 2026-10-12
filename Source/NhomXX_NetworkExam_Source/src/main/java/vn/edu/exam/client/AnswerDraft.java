@@ -70,8 +70,9 @@ public record AnswerDraft(
     }
 
     /**
-     * Creates the immutable snapshot for the latest local change. If that version already has a
-     * pending snapshot, the existing snapshot is retained so a retry cannot change its identity.
+     * Creates the immutable snapshot for the latest local change. There can be only one pending
+     * snapshot per question, so a newer local selection waits until this snapshot is acknowledged.
+     * Repeated preparation therefore preserves the retry identity even when local state advances.
      */
     public AnswerDraft prepareUpdate(String sessionId, String requestId) {
         requireText(sessionId, "sessionId");
@@ -79,7 +80,7 @@ public record AnswerDraft(
         if (localVersion == confirmedVersion) {
             throw new IllegalStateException("There is no unsaved answer change");
         }
-        if (pendingSnapshot != null && pendingSnapshot.version() == localVersion) {
+        if (pendingSnapshot != null) {
             return this;
         }
         return new AnswerDraft(
