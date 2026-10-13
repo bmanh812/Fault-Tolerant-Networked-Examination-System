@@ -126,6 +126,7 @@ public final class ExamUiController implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        ui.dispatch(view::stopCountdown);
         if (networkExecutor instanceof ExecutorService service) {
             service.shutdownNow();
         }

@@ -58,6 +58,9 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
     private final JButton submitButton = new JButton("Nộp bài");
     private final Map<String, QuestionWidgets> questionWidgets = new LinkedHashMap<>();
     private final Timer connectionPoll;
+    private final ExamCountdownTimer countdownTimer;
+
+    private String displayedDeadline = "";
 
     private ExamUiController controller;
 
@@ -77,6 +80,11 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
                 controller.refreshConnectionState();
             }
         });
+        countdownTimer = new ExamCountdownTimer(
+                new ExamCountdown(),
+                new SwingCountdownTicker(500),
+                this::renderCountdown
+        );
 
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         setMinimumSize(new Dimension(820, 620));
@@ -130,12 +138,22 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
                         + "    |    Phiên: " + exam.sessionId()
                         + "    |    Trạng thái: " + exam.sessionStatus()
         );
-        timerLabel.setText(
-                "Thời gian còn lại: sẽ được đồng bộ ở Phase 7"
-                        + "    |    Deadline: " + DEADLINE_FORMAT.format(Instant.ofEpochMilli(exam.deadline()))
-        );
+        syncCountdown(exam.serverTime(), exam.deadline());
         rebuildQuestions(exam);
         cardLayout.show(cards, EXAM_CARD);
+    }
+
+    @Override
+    public void syncCountdown(long serverTimeEpochMillis, long deadlineEpochMillis) {
+        displayedDeadline = deadlineEpochMillis > 0
+                ? DEADLINE_FORMAT.format(Instant.ofEpochMilli(deadlineEpochMillis))
+                : "không khả dụng";
+        countdownTimer.sync(serverTimeEpochMillis, deadlineEpochMillis);
+    }
+
+    @Override
+    public void stopCountdown() {
+        countdownTimer.stop();
     }
 
     @Override
@@ -314,6 +332,7 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
 
     private void closeWindow() {
         connectionPoll.stop();
+        stopCountdown();
         setEnabled(false);
         ExamUiController activeController = controller;
         Thread closer = new Thread(() -> {
@@ -324,6 +343,16 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
         }, "exam-ui-close");
         closer.setDaemon(true);
         closer.start();
+    }
+
+    private void renderCountdown(ExamCountdownTimer.Display display) {
+        timerLabel.setText(switch (display.state()) {
+            case RUNNING -> "Thời gian còn lại: " + display.text()
+                    + "    |    Deadline: " + displayedDeadline;
+            case EXPIRED_WAITING_FOR_SERVER -> "Thời gian còn lại: 00:00"
+                    + "    |    Hết thời gian - đang chờ xác nhận từ Server";
+            case UNAVAILABLE -> "Thời gian còn lại: không khả dụng";
+        });
     }
 
     private static void updateStatus(JLabel label, AnswerDisplayStatus status) {

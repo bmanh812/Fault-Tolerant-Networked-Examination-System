@@ -14,7 +14,7 @@ Bộ khung mới cho đề tài hệ thống thi trắc nghiệm qua mạng có 
 
 ## Trạng thái hiện tại
 
-Protocol v1, framing, state model và database schema đã có. Server xử lý `JOIN_EXAM`, `ANSWER_UPDATE` và `SUBMIT`: tạo hoặc lấy lại session đang hoạt động, trả đề MCQ, kiểm tra question/option/version, commit đáp án trước `ANSWER_ACK`, và ghi manual submission trước `SUBMIT_ACK`. Nộp lặp trả lại cùng trạng thái và thời điểm nộp. Server tự nộp session quá hạn bằng lịch hẹn và quét định kỳ, kể cả khi Client offline; Client đang kết nối nhận `AUTO_SUBMIT`. Client Swing hiện có thể tham gia, hiển thị đề, khôi phục đáp án đã lưu và autosave lựa chọn qua `ANSWER_UPDATE/ANSWER_ACK`. `RECONNECT/RESYNC_STATE`, timer authoritative và submit từ giao diện vẫn cần triển khai.
+Protocol v1, framing, state model và database schema đã có. Server xử lý `JOIN_EXAM`, `ANSWER_UPDATE` và `SUBMIT`: tạo hoặc lấy lại session đang hoạt động, trả đề MCQ, kiểm tra question/option/version, commit đáp án trước `ANSWER_ACK`, và ghi manual submission trước `SUBMIT_ACK`. Nộp lặp trả lại cùng trạng thái và thời điểm nộp. Server tự nộp session quá hạn bằng lịch hẹn và quét định kỳ, kể cả khi Client offline; Client đang kết nối nhận `AUTO_SUBMIT`. Client Swing hiện có thể tham gia, hiển thị đề, khôi phục đáp án đã lưu, autosave lựa chọn qua `ANSWER_UPDATE/ANSWER_ACK` và hiển thị countdown đồng bộ từ `serverTime`/`deadline`. `RECONNECT/RESYNC_STATE` và submit từ giao diện vẫn cần triển khai.
 
 ## Công nghệ
 
@@ -69,7 +69,7 @@ Chạy Client:
 mvn.cmd exec:java "-Dexec.mainClass=vn.edu.exam.client.ClientMain"
 ```
 
-Cửa sổ Swing sẽ mở với host/port lấy từ `config/application.properties`. Nhập `CAND-001`, `EXAM-001`, chọn đáp án và quan sát trạng thái `Đang lưu...`/`Đã lưu`. Vùng thời gian mới là placeholder và nút `Nộp bài` được khóa cho tới các phase tương ứng.
+Cửa sổ Swing sẽ mở với host/port lấy từ `config/application.properties`. Nhập `CAND-001`, `EXAM-001`, quan sát countdown, chọn đáp án và quan sát trạng thái `Đang lưu...`/`Đã lưu`. Countdown chỉ để hiển thị; Server vẫn quyết định deadline/auto-submit. Nút `Nộp bài` được khóa cho tới Phase 8.
 
 ## Thứ tự triển khai P0
 

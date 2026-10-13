@@ -154,12 +154,14 @@ class ExamUiControllerTest {
     @Test
     void closeIsIdempotentAndClosesTheClientGateway() {
         FakeGateway gateway = new FakeGateway(snapshot(false));
-        ExamUiController controller = controller(gateway, new FakeView(), Runnable::run);
+        FakeView view = new FakeView();
+        ExamUiController controller = controller(gateway, view, Runnable::run);
 
         controller.close();
         controller.close();
 
         assertEquals(1, gateway.closeCalls);
+        assertEquals(1, view.countdownStopCalls);
     }
 
     private static ExamUiController controller(
@@ -285,6 +287,7 @@ class ExamUiControllerTest {
         private String joinError;
         private ClientExamState.Snapshot exam;
         private ConnectionDisplayStatus connectionStatus;
+        private int countdownStopCalls;
         private final Map<String, AnswerDisplayStatus> answerStatuses = new java.util.HashMap<>();
         private final Map<String, AnswerDraft> answers = new java.util.HashMap<>();
 
@@ -301,6 +304,11 @@ class ExamUiControllerTest {
         @Override
         public void showExam(ClientExamState.Snapshot exam) {
             this.exam = exam;
+        }
+
+        @Override
+        public void stopCountdown() {
+            countdownStopCalls++;
         }
 
         @Override
