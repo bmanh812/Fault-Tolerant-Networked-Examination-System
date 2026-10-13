@@ -14,11 +14,13 @@ import java.util.UUID;
 
 public final class ClientExamState {
     private Snapshot current = Snapshot.empty();
+    private boolean answersFrozen;
 
     public void applyExamState(Payloads.ExamState examState) {
         Snapshot prepared = prepare(Objects.requireNonNull(examState, "examState is required"));
         synchronized (this) {
             current = prepared;
+            answersFrozen = false;
         }
     }
 
@@ -50,11 +52,29 @@ public final class ClientExamState {
         return current.sessionStatus();
     }
 
+    synchronized void applySubmission(ExamSubmission submission) {
+        if (!Objects.equals(current.sessionId(), submission.sessionId())) {
+            throw new IllegalArgumentException("Submission belongs to another session");
+        }
+        current = new Snapshot(
+                current.sessionId(), current.examId(), current.title(), submission.state().name(),
+                current.deadline(), current.serverTime(), current.questions(), current.answers()
+        );
+        answersFrozen = true;
+    }
+
+    synchronized void freezeAnswers() {
+        answersFrozen = true;
+    }
+
     public synchronized List<Question> questions() {
         return current.questions();
     }
 
     public synchronized AnswerDraft selectAnswer(String questionId, String optionId) {
+        if (answersFrozen) {
+            throw new IllegalStateException("Answers are frozen for submission");
+        }
         AnswerDraft answer = requireAnswer(questionId);
         requireOption(questionId, optionId);
         AnswerDraft updated = answer.select(optionId);

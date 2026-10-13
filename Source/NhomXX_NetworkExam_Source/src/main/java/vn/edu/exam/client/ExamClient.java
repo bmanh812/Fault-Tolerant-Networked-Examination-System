@@ -11,6 +11,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,6 +29,7 @@ import java.util.function.Consumer;
 
 import static vn.edu.exam.common.protocol.MessageType.JOIN_EXAM;
 import static vn.edu.exam.common.protocol.MessageType.ANSWER_UPDATE;
+import static vn.edu.exam.common.protocol.MessageType.SUBMIT;
 
 public final class ExamClient implements AutoCloseable {
     private final AtomicReference<ClientState> state = new AtomicReference<>(ClientState.DISCONNECTED);
@@ -41,10 +43,16 @@ public final class ExamClient implements AutoCloseable {
     private final Map<String, AnswerInFlight> answerUpdatesInFlight = new HashMap<>();
     /** Guarded by lifecycleLock; retained for the reconnect/resync phase. */
     private final Map<String, AnswerSyncIssue> answerSyncIssues = new HashMap<>();
+    /** Guarded by lifecycleLock; retained after timeout so retries reuse the logical requestId. */
+    private SubmissionAttempt submitAttempt;
+    /** Guarded by lifecycleLock; authoritative final state from SUBMIT_ACK or AUTO_SUBMIT. */
+    private ExamSubmission finalSubmission;
 
     private volatile ProtocolTransport transport;
     private volatile Thread readerThread;
     private volatile Consumer<ProtocolMessage> serverPushHandler = message -> {
+    };
+    private volatile Consumer<ExamSubmission> submissionHandler = submission -> {
     };
 
     public ExamClient(ClientTransportConfig config) {
@@ -111,6 +119,9 @@ public final class ExamClient implements AutoCloseable {
 
         synchronized (lifecycleLock) {
             activeTransport = requireConnectedTransport();
+            if (request.type() == ANSWER_UPDATE && finalSubmission != null) {
+                throw new IllegalStateException("Finalized exam cannot send answer updates");
+            }
             if (pendingRequests.putIfAbsent(request.requestId(), pending) != null) {
                 throw new IllegalArgumentException("A request with this requestId is already pending");
             }
@@ -121,7 +132,7 @@ public final class ExamClient implements AutoCloseable {
             });
 
             ScheduledFuture<?> timeoutTask = timeoutScheduler.schedule(
-                    () -> timeoutRequest(request.requestId()),
+                    () -> timeoutRequest(request.requestId(), pending),
                     config.requestTimeoutMs(),
                     TimeUnit.MILLISECONDS
             );
@@ -146,6 +157,10 @@ public final class ExamClient implements AutoCloseable {
 
     public void setServerPushHandler(Consumer<ProtocolMessage> handler) {
         serverPushHandler = Objects.requireNonNull(handler, "handler is required");
+    }
+
+    public void setSubmissionHandler(Consumer<ExamSubmission> handler) {
+        submissionHandler = Objects.requireNonNull(handler, "handler is required");
     }
 
     public void disconnect() throws IOException {
@@ -187,6 +202,10 @@ public final class ExamClient implements AutoCloseable {
 
     public ClientState state() {
         return state.get();
+    }
+
+    public boolean isConnected() {
+        return transport != null;
     }
 
     public ClientExamState examState() {
@@ -239,6 +258,98 @@ public final class ExamClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Freezes editing, flushes every unsaved answer, then submits with one retained logical
+     * request. A retry after timeout or a retryable failure reuses exactly the same requestId.
+     */
+    public CompletableFuture<ExamSubmission> submitExam() {
+        SubmissionAttempt attempt;
+        CompletableFuture<ExamSubmission> call;
+        synchronized (lifecycleLock) {
+            if (finalSubmission != null) {
+                return CompletableFuture.completedFuture(finalSubmission);
+            }
+            try {
+                beginSubmission();
+            } catch (RuntimeException error) {
+                return CompletableFuture.failedFuture(error);
+            }
+
+            attempt = Objects.requireNonNull(submitAttempt, "SUBMITTING requires a submit attempt");
+            if (attempt.inProgress()) {
+                return attempt.currentCall();
+            }
+            call = new CompletableFuture<>();
+            attempt.begin(call);
+        }
+
+        CompletableFuture.completedFuture((Void) null)
+                .thenCompose(ignored -> flushAnswersForSubmit())
+                .thenCompose(ignored -> sendSubmitAttempt(attempt))
+                .whenComplete((submission, error) -> {
+                    ExamSubmission authoritative;
+                    synchronized (lifecycleLock) {
+                        attempt.finish();
+                        authoritative = finalSubmission;
+                    }
+                    if (authoritative != null) {
+                        call.complete(authoritative);
+                    } else if (error == null) {
+                        call.complete(submission);
+                    } else {
+                        call.completeExceptionally(unwrapCompletionFailure(error));
+                    }
+                });
+        return call;
+    }
+
+    /** Local-only boundary: freeze edits immediately, without doing socket I/O on the UI thread. */
+    public void beginSubmission() {
+        synchronized (lifecycleLock) {
+            if (finalSubmission != null || state.get() == ClientState.SUBMITTING) {
+                return;
+            }
+            requireActiveExam();
+            requireConnectedTransport();
+            ProtocolMessage request = ProtocolMessage.request(
+                    SUBMIT, PayloadCodec.toMap(new Payloads.SubmitRequest(examState.sessionId()))
+            );
+            ProtocolValidator.validateClientMessage(request);
+            submitAttempt = new SubmissionAttempt(request);
+            examState.freezeAnswers();
+            state.set(ClientState.SUBMITTING);
+        }
+    }
+
+    public boolean submitRequestSent() {
+        synchronized (lifecycleLock) {
+            return submitAttempt != null && submitAttempt.sent;
+        }
+    }
+
+    public Optional<ExamSubmission> submission() {
+        synchronized (lifecycleLock) {
+            return Optional.ofNullable(finalSubmission);
+        }
+    }
+
+    public Optional<String> submitRequestId() {
+        synchronized (lifecycleLock) {
+            return submitAttempt == null
+                    ? Optional.empty()
+                    : Optional.of(submitAttempt.request().requestId());
+        }
+    }
+
+    public boolean submitRetryAvailable() {
+        synchronized (lifecycleLock) {
+            return state.get() == ClientState.SUBMITTING
+                    && transport != null
+                    && submitAttempt != null
+                    && !submitAttempt.inProgress();
+        }
+    }
+
     /** Prepares local immutable data without performing network I/O. */
     public AnswerDraft.UpdateSnapshot prepareAnswerUpdate(String questionId) {
         synchronized (lifecycleLock) {
@@ -257,9 +368,9 @@ public final class ExamClient implements AutoCloseable {
     private CompletableFuture<AnswerDraft> ensureAnswerConfirmed(String questionId, int targetVersion) {
         CompletableFuture<AnswerDraft> currentStep;
         synchronized (lifecycleLock) {
-            if (state.get() != ClientState.ACTIVE) {
+            if (state.get() != ClientState.ACTIVE && state.get() != ClientState.SUBMITTING) {
                 return CompletableFuture.failedFuture(
-                        new IllegalStateException("Client must have an active exam")
+                        new IllegalStateException("Client cannot synchronize answers in its current state")
                 );
             }
 
@@ -418,6 +529,96 @@ public final class ExamClient implements AutoCloseable {
         return error;
     }
 
+    private CompletableFuture<Void> flushAnswersForSubmit() {
+        Map<String, Integer> requiredVersions = new LinkedHashMap<>();
+        synchronized (lifecycleLock) {
+            if (state.get() == ClientState.AUTO_SUBMITTED || state.get() == ClientState.SUBMITTED) {
+                return CompletableFuture.completedFuture(null);
+            }
+            if (state.get() != ClientState.SUBMITTING) {
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("Client is no longer submitting")
+                );
+            }
+            for (Map.Entry<String, AnswerDraft> entry : examState.answerSnapshot().entrySet()) {
+                AnswerDraft answer = entry.getValue();
+                if (!answer.isSaved()) {
+                    requiredVersions.put(entry.getKey(), answer.localVersion());
+                }
+            }
+        }
+
+        CompletableFuture<?>[] updates = requiredVersions.entrySet().stream()
+                .map(entry -> ensureAnswerConfirmed(entry.getKey(), entry.getValue()))
+                .toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(updates).handle((ignored, error) -> {
+            if (error != null) {
+                throw new java.util.concurrent.CompletionException(
+                        SubmitException.answerSyncFailed(unwrapCompletionFailure(error))
+                );
+            }
+            return null;
+        });
+    }
+
+    private CompletableFuture<ExamSubmission> sendSubmitAttempt(SubmissionAttempt attempt) {
+        synchronized (lifecycleLock) {
+            if (state.get() == ClientState.SUBMITTED || state.get() == ClientState.AUTO_SUBMITTED) {
+                return CompletableFuture.completedFuture(finalSubmission);
+            }
+            if (state.get() != ClientState.SUBMITTING || submitAttempt != attempt) {
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("Logical submit attempt is no longer active")
+                );
+            }
+            // Keep the final-state check and write in the same lifecycle critical section.
+            attempt.sent = true;
+            return sendRequest(attempt.request()).thenApply(response ->
+                    applySubmitResponse(attempt.request(), response)
+            );
+        }
+    }
+
+    private ExamSubmission applySubmitResponse(
+            ProtocolMessage request,
+            ProtocolMessage response
+    ) {
+        ProtocolValidator.validateResponseTo(request, response);
+        if (response.type() == MessageType.ERROR) {
+            Payloads.ErrorResponse error = PayloadCodec.fromMap(
+                    response.payload(), Payloads.ErrorResponse.class
+            );
+            throw SubmitException.serverRejected(error.code(), error.message());
+        }
+
+        Payloads.SubmitAck acknowledgement = PayloadCodec.fromMap(
+                response.payload(), Payloads.SubmitAck.class
+        );
+        ExamSubmission applied;
+        synchronized (lifecycleLock) {
+            if (!Objects.equals(examState.sessionId(), acknowledgement.sessionId())) {
+                throw new IllegalArgumentException("SUBMIT_ACK belongs to another session");
+            }
+            if (state.get() == ClientState.AUTO_SUBMITTED || state.get() == ClientState.SUBMITTED) {
+                return finalSubmission;
+            }
+            if (state.get() != ClientState.SUBMITTING) {
+                throw new CancellationException("SUBMIT was cancelled before SUBMIT_ACK was applied");
+            }
+            finalSubmission = new ExamSubmission(
+                    acknowledgement.sessionId(),
+                    ClientState.SUBMITTED,
+                    acknowledgement.submittedAt()
+            );
+            examState.applySubmission(finalSubmission);
+            state.set(ClientState.SUBMITTED);
+            submitAttempt = null;
+            applied = finalSubmission;
+        }
+        notifySubmission(applied);
+        return applied;
+    }
+
     int pendingRequestCount() {
         return pendingRequests.size();
     }
@@ -466,6 +667,10 @@ public final class ExamClient implements AutoCloseable {
         if (message.type() == MessageType.AUTO_SUBMIT) {
             try {
                 ProtocolValidator.validateServerMessage(message);
+                ExamSubmission submission = applyAutoSubmit(message);
+                if (submission != null) {
+                    notifySubmission(submission);
+                }
                 serverPushHandler.accept(message);
             } catch (RuntimeException ignored) {
                 // A malformed push or handler failure must not terminate the socket reader.
@@ -483,6 +688,57 @@ public final class ExamClient implements AutoCloseable {
             pending.future().complete(message);
         } catch (RuntimeException error) {
             pending.future().completeExceptionally(error);
+        }
+    }
+
+    private ExamSubmission applyAutoSubmit(ProtocolMessage message) {
+        Payloads.AutoSubmit autoSubmit = PayloadCodec.fromMap(
+                message.payload(), Payloads.AutoSubmit.class
+        );
+        CompletableFuture<ExamSubmission> submitCall = null;
+        ExamSubmission applied;
+        synchronized (lifecycleLock) {
+            if (!Objects.equals(examState.sessionId(), autoSubmit.sessionId())) {
+                return null;
+            }
+            if (state.get() == ClientState.SUBMITTED) {
+                return null;
+            }
+            if (state.get() == ClientState.AUTO_SUBMITTED) {
+                return null;
+            }
+            if (state.get() != ClientState.ACTIVE && state.get() != ClientState.SUBMITTING) {
+                return null;
+            }
+            applied = new ExamSubmission(
+                    autoSubmit.sessionId(),
+                    ClientState.AUTO_SUBMITTED,
+                    autoSubmit.submittedAt()
+            );
+            finalSubmission = applied;
+            examState.applySubmission(applied);
+            state.set(ClientState.AUTO_SUBMITTED);
+            if (submitAttempt != null && submitAttempt.currentCall() != null) {
+                submitCall = submitAttempt.currentCall();
+            }
+            SubmissionAttempt superseded = submitAttempt;
+            submitAttempt = null;
+            if (submitCall != null) {
+                submitCall.complete(applied);
+            }
+            if (superseded != null) {
+                completeExceptionally(superseded.request().requestId(),
+                        new CancellationException("AUTO_SUBMIT superseded manual submit"));
+            }
+        }
+        return applied;
+    }
+
+    private void notifySubmission(ExamSubmission submission) {
+        try {
+            submissionHandler.accept(submission);
+        } catch (RuntimeException ignored) {
+            // A presentation callback cannot invalidate an authoritative submission.
         }
     }
 
@@ -515,6 +771,8 @@ public final class ExamClient implements AutoCloseable {
             examState.applyExamState(received);
             answerUpdatesInFlight.clear();
             answerSyncIssues.clear();
+            submitAttempt = null;
+            finalSubmission = null;
             state.set(ClientState.ACTIVE);
             return examState.snapshot();
         }
@@ -540,9 +798,8 @@ public final class ExamClient implements AutoCloseable {
         );
     }
 
-    private void timeoutRequest(String requestId) {
-        PendingRequest pending = pendingRequests.remove(requestId);
-        if (pending != null) {
+    private void timeoutRequest(String requestId, PendingRequest pending) {
+        if (pendingRequests.remove(requestId, pending)) {
             pending.future().completeExceptionally(new TimeoutException(
                     "Request " + requestId + " timed out after " + config.requestTimeoutMs() + " ms"
             ));
@@ -591,7 +848,7 @@ public final class ExamClient implements AutoCloseable {
                 return;
             }
             transport = null;
-            if (state.get() != ClientState.CLOSED) {
+            if (state.get() != ClientState.CLOSED && finalSubmission == null) {
                 state.set(ClientState.DISCONNECTED);
             }
             threadToStop = readerThread;
@@ -617,7 +874,9 @@ public final class ExamClient implements AutoCloseable {
             if (targetState == ClientState.DISCONNECTED && state.get() == ClientState.DISCONNECTED) {
                 return;
             }
-            state.set(targetState);
+            if (targetState == ClientState.CLOSED || finalSubmission == null) {
+                state.set(targetState);
+            }
             current = transport;
             transport = null;
             threadToStop = readerThread;
@@ -704,5 +963,37 @@ public final class ExamClient implements AutoCloseable {
             AnswerDraft.UpdateSnapshot snapshot,
             CompletableFuture<AnswerDraft> completion
     ) {
+    }
+
+    private static final class SubmissionAttempt {
+        private final ProtocolMessage request;
+        private CompletableFuture<ExamSubmission> currentCall;
+        private boolean inProgress;
+        private boolean sent;
+
+        private SubmissionAttempt(ProtocolMessage request) {
+            this.request = request;
+        }
+
+        private ProtocolMessage request() {
+            return request;
+        }
+
+        private CompletableFuture<ExamSubmission> currentCall() {
+            return currentCall;
+        }
+
+        private boolean inProgress() {
+            return inProgress;
+        }
+
+        private void begin(CompletableFuture<ExamSubmission> call) {
+            currentCall = call;
+            inProgress = true;
+        }
+
+        private void finish() {
+            inProgress = false;
+        }
     }
 }

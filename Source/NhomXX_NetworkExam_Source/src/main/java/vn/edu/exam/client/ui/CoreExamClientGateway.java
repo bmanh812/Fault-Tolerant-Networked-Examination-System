@@ -5,11 +5,13 @@ import vn.edu.exam.client.AnswerSyncIssue;
 import vn.edu.exam.client.ClientExamState;
 import vn.edu.exam.client.ClientState;
 import vn.edu.exam.client.ExamClient;
+import vn.edu.exam.client.ExamSubmission;
 
 import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 public final class CoreExamClientGateway implements ExamClientGateway {
     private final ExamClient client;
@@ -34,6 +36,36 @@ public final class CoreExamClientGateway implements ExamClientGateway {
     }
 
     @Override
+    public AnswerDraft selectAnswer(String questionId, String optionId) {
+        return client.selectAnswer(questionId, optionId);
+    }
+
+    @Override
+    public CompletableFuture<AnswerDraft> sendAnswerUpdate(String questionId) {
+        return client.sendAnswerUpdate(questionId);
+    }
+
+    @Override
+    public void beginSubmission() {
+        client.beginSubmission();
+    }
+
+    @Override
+    public boolean submitRequestSent() {
+        return client.submitRequestSent();
+    }
+
+    @Override
+    public boolean isConnected() {
+        return client.isConnected();
+    }
+
+    @Override
+    public CompletableFuture<ExamSubmission> submitExam() {
+        return client.submitExam();
+    }
+
+    @Override
     public ClientExamState.Snapshot snapshot() {
         return client.examState().snapshot();
     }
@@ -51,6 +83,16 @@ public final class CoreExamClientGateway implements ExamClientGateway {
     @Override
     public boolean answerUpdateInFlight(String questionId) {
         return client.answerUpdateInFlight(questionId);
+    }
+
+    @Override
+    public boolean submitRetryAvailable() {
+        return client.submitRetryAvailable();
+    }
+
+    @Override
+    public void setSubmissionHandler(Consumer<ExamSubmission> handler) {
+        client.setSubmissionHandler(handler);
     }
 
     @Override

@@ -6,6 +6,7 @@ public enum ClientState {
     CONNECTED,
     JOINING,
     ACTIVE,
+    SUBMITTING,
     RECONNECTING,
     SUBMITTED,
     AUTO_SUBMITTED,

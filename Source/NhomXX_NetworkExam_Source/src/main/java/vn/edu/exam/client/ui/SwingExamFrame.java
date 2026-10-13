@@ -10,6 +10,7 @@ import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
@@ -56,6 +57,7 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
     private final JLabel timerLabel = new JLabel("Thời gian còn lại: sẽ được đồng bộ ở Phase 7");
     private final JPanel questionsPanel = new JPanel();
     private final JButton submitButton = new JButton("Nộp bài");
+    private final JLabel submissionLabel = new JLabel(SubmissionDisplayStatus.READY.label());
     private final Map<String, QuestionWidgets> questionWidgets = new LinkedHashMap<>();
     private final Timer connectionPoll;
     private final ExamCountdownTimer countdownTimer;
@@ -112,6 +114,18 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
                 candidateField.getText(),
                 examField.getText()
         ));
+        submitButton.addActionListener(event -> {
+            int choice = JOptionPane.showConfirmDialog(
+                    this,
+                    "Bạn có chắc chắn muốn nộp bài?",
+                    "Xác nhận nộp bài",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.QUESTION_MESSAGE
+            );
+            if (choice == JOptionPane.YES_OPTION) {
+                controller.submit();
+            }
+        });
         connectionPoll.start();
     }
 
@@ -139,6 +153,7 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
                         + "    |    Trạng thái: " + exam.sessionStatus()
         );
         syncCountdown(exam.serverTime(), exam.deadline());
+        showSubmissionStatus(SubmissionDisplayStatus.READY, null);
         rebuildQuestions(exam);
         cardLayout.show(cards, EXAM_CARD);
     }
@@ -198,6 +213,30 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
                 option.setEnabled(enabled);
             }
         }
+    }
+
+    @Override
+    public void setSubmitEnabled(boolean enabled) {
+        submitButton.setEnabled(enabled);
+    }
+
+    @Override
+    public void showSubmissionStatus(SubmissionDisplayStatus status, String detail) {
+        String text = status.label();
+        if (detail != null && !detail.isBlank()) {
+            text += " " + detail;
+        }
+        submissionLabel.setText(text);
+        submissionLabel.setForeground(switch (status) {
+            case SUBMITTED -> new Color(28, 122, 65);
+            case AUTO_SUBMITTED -> new Color(40, 80, 150);
+            case SUBMITTING, SYNCHRONIZING -> new Color(176, 112, 0);
+            case RETRYABLE_ERROR -> new Color(180, 35, 35);
+            case READY -> Color.DARK_GRAY;
+        });
+        submitButton.setText(status == SubmissionDisplayStatus.RETRYABLE_ERROR
+                ? "Thử nộp lại"
+                : "Nộp bài");
     }
 
     private JPanel createJoinPanel() {
@@ -262,9 +301,8 @@ public final class SwingExamFrame extends JFrame implements ExamUiView {
         panel.add(scroll, BorderLayout.CENTER);
 
         submitButton.setEnabled(false);
-        submitButton.setToolTipText("Luồng nộp bài sẽ được triển khai ở Phase 8");
         JPanel footer = new JPanel(new BorderLayout());
-        footer.add(new JLabel("Nộp bài được khóa cho tới Phase 8."), BorderLayout.WEST);
+        footer.add(submissionLabel, BorderLayout.WEST);
         footer.add(submitButton, BorderLayout.EAST);
         panel.add(footer, BorderLayout.SOUTH);
         return panel;

@@ -5,6 +5,8 @@ import vn.edu.exam.client.AnswerSyncIssue;
 import vn.edu.exam.client.ClientExamState;
 import vn.edu.exam.client.ClientState;
 import vn.edu.exam.client.ExamJoinException;
+import vn.edu.exam.client.ExamSubmission;
+import vn.edu.exam.client.SubmitException;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -21,6 +23,9 @@ public final class ExamUiController implements AutoCloseable {
     private final Executor networkExecutor;
     private final UiDispatcher ui;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean submissionInProgress = new AtomicBoolean();
+    /** Accessed only through the UI dispatcher. */
+    private ExamSubmission displayedSubmission;
 
     public ExamUiController(
             ExamClientGateway client,
@@ -32,6 +37,9 @@ public final class ExamUiController implements AutoCloseable {
         this.view = Objects.requireNonNull(view, "view is required");
         this.networkExecutor = Objects.requireNonNull(networkExecutor, "networkExecutor is required");
         this.ui = Objects.requireNonNull(ui, "ui dispatcher is required");
+        this.client.setSubmissionHandler(submission ->
+                this.ui.dispatch(() -> showFinalSubmissionOnUiThread(submission))
+        );
     }
 
     public void join(String host, String portText, String candidateId, String examId) {
@@ -54,8 +62,13 @@ public final class ExamUiController implements AutoCloseable {
                         .get();
                 ui.dispatch(() -> {
                     view.showExam(exam);
-                    view.showConnectionState(ConnectionDisplayStatus.CONNECTED);
-                    view.setAnsweringEnabled(true);
+                    // A deadline push may have arrived before this queued JOIN presentation.
+                    if (displayedSubmission != null) {
+                        renderFinalSubmission(displayedSubmission);
+                    } else {
+                        view.showSubmissionStatus(SubmissionDisplayStatus.READY, null);
+                    }
+                    refreshConnectionStateOnUiThread();
                 });
             } catch (Throwable error) {
                 String message = friendlyMessage(error);
@@ -71,11 +84,21 @@ public final class ExamUiController implements AutoCloseable {
         if (closed.get()) {
             return;
         }
+        try {
+            // Apply the local choice before queuing I/O, so immediate submit includes this choice.
+            client.selectAnswer(questionId, optionId);
+        } catch (RuntimeException error) {
+            ui.dispatch(() -> refreshAnswerOnUiThread(questionId));
+            return;
+        }
         ui.dispatch(() -> view.showAnswerStatus(questionId, AnswerDisplayStatus.SAVING));
 
         networkExecutor.execute(() -> {
             try {
-                client.updateAnswer(questionId, optionId)
+                if (client.state() != ClientState.ACTIVE) {
+                    return; // The submission flush owns all staged answers after freeze.
+                }
+                client.sendAnswerUpdate(questionId)
                         .whenComplete((answer, error) -> ui.dispatch(() -> {
                             refreshAnswerOnUiThread(questionId);
                             if (error != null) {
@@ -96,6 +119,48 @@ public final class ExamUiController implements AutoCloseable {
         ui.dispatch(this::refreshConnectionStateOnUiThread);
     }
 
+    public void submit() {
+        if (closed.get() || !submissionInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            client.beginSubmission();
+        } catch (RuntimeException error) {
+            submissionInProgress.set(false);
+            ui.dispatch(() -> showSubmitFailure(error));
+            return;
+        }
+        ui.dispatch(() -> {
+            if (displayedSubmission != null || closed.get()) {
+                return;
+            }
+            view.setAnsweringEnabled(false);
+            view.setSubmitEnabled(false);
+            boolean pending = client.snapshot().answers().values().stream().anyMatch(answer -> !answer.isSaved());
+            view.showSubmissionStatus(pending && !client.submitRequestSent()
+                    ? SubmissionDisplayStatus.SYNCHRONIZING
+                    : SubmissionDisplayStatus.SUBMITTING, null);
+        });
+
+        networkExecutor.execute(() -> {
+            try {
+                client.submitExam().whenComplete((submission, error) -> {
+                    submissionInProgress.set(false);
+                    ui.dispatch(() -> {
+                        if (error == null) {
+                            showFinalSubmissionOnUiThread(submission);
+                        } else {
+                            showSubmitFailure(error);
+                        }
+                    });
+                });
+            } catch (RuntimeException error) {
+                submissionInProgress.set(false);
+                ui.dispatch(() -> showSubmitFailure(error));
+            }
+        });
+    }
+
     private void refreshAnswerOnUiThread(String questionId) {
         AnswerDraft answer = client.snapshot().answers().get(questionId);
         if (answer == null) {
@@ -114,11 +179,75 @@ public final class ExamUiController implements AutoCloseable {
         ClientState state = client.state();
         ConnectionDisplayStatus display = switch (state) {
             case CONNECTING, JOINING -> ConnectionDisplayStatus.CONNECTING;
-            case CONNECTED, ACTIVE -> ConnectionDisplayStatus.CONNECTED;
-            default -> ConnectionDisplayStatus.DISCONNECTED;
+            default -> client.isConnected()
+                    ? ConnectionDisplayStatus.CONNECTED : ConnectionDisplayStatus.DISCONNECTED;
         };
         view.showConnectionState(display);
-        view.setAnsweringEnabled(state == ClientState.ACTIVE);
+        view.setAnsweringEnabled(state == ClientState.ACTIVE && !submissionInProgress.get());
+        view.setSubmitEnabled(
+                client.isConnected() && !submissionInProgress.get()
+                        && (state == ClientState.ACTIVE
+                        || (state == ClientState.SUBMITTING && client.submitRetryAvailable()))
+        );
+        if (state == ClientState.SUBMITTING && submissionInProgress.get()) {
+            view.showSubmissionStatus(client.submitRequestSent()
+                    ? SubmissionDisplayStatus.SUBMITTING
+                    : SubmissionDisplayStatus.SYNCHRONIZING, null);
+        }
+    }
+
+    private void showFinalSubmissionOnUiThread(ExamSubmission submission) {
+        if (closed.get() || submission == null || displayedSubmission != null) {
+            return;
+        }
+        displayedSubmission = submission;
+        renderFinalSubmission(submission);
+    }
+
+    private void renderFinalSubmission(ExamSubmission submission) {
+        view.setAnsweringEnabled(false);
+        view.setSubmitEnabled(false);
+        view.stopCountdown();
+        view.showSubmissionStatus(
+                submission.autoSubmitted()
+                        ? SubmissionDisplayStatus.AUTO_SUBMITTED
+                        : SubmissionDisplayStatus.SUBMITTED,
+                null
+        );
+    }
+
+    private void showSubmitFailure(Throwable error) {
+        if (closed.get() || displayedSubmission != null) {
+            return;
+        }
+        view.showSubmissionStatus(SubmissionDisplayStatus.RETRYABLE_ERROR, friendlySubmitMessage(error));
+        refreshConnectionStateOnUiThread();
+    }
+
+    private static String friendlySubmitMessage(Throwable failure) {
+        Throwable error = unwrap(failure);
+        if (error instanceof SubmitException submitError) {
+            if (submitError.answerSyncFailure()) {
+                return "Không thể đồng bộ toàn bộ đáp án trước khi nộp. Vui lòng thử lại.";
+            }
+            if (submitError.errorCode() != null) {
+                return switch (submitError.errorCode()) {
+                    case EXAM_ENDED, ALREADY_SUBMITTED ->
+                            "Server đang xác nhận trạng thái nộp bài. Vui lòng chờ hoặc thử lại.";
+                    case SERVER_BUSY -> "Máy chủ đang bận, vui lòng thử nộp lại.";
+                    default -> "Server từ chối nộp bài: " + submitError.getMessage();
+                };
+            }
+        }
+        if (error instanceof TimeoutException) {
+            return "Chưa nhận được xác nhận từ Server. Thử lại sẽ giữ nguyên yêu cầu nộp bài.";
+        }
+        if (error instanceof IOException) {
+            return "Mất kết nối khi nộp bài; kết quả chưa được xác nhận.";
+        }
+        return "Chưa thể nộp bài: " + (error.getMessage() == null
+                ? "lỗi không xác định"
+                : error.getMessage());
     }
 
     @Override

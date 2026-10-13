@@ -25,4 +25,10 @@ public interface ExamUiView {
     void showConnectionState(ConnectionDisplayStatus status);
 
     void setAnsweringEnabled(boolean enabled);
+
+    default void setSubmitEnabled(boolean enabled) {
+    }
+
+    default void showSubmissionStatus(SubmissionDisplayStatus status, String detail) {
+    }
 }

@@ -6,6 +6,7 @@ import vn.edu.exam.client.AnswerSyncIssue;
 import vn.edu.exam.client.ClientExamState;
 import vn.edu.exam.client.ClientState;
 import vn.edu.exam.client.ExamJoinException;
+import vn.edu.exam.client.ExamSubmission;
 import vn.edu.exam.common.protocol.ErrorCode;
 import vn.edu.exam.common.protocol.Payloads;
 
@@ -16,6 +17,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -164,6 +167,119 @@ class ExamUiControllerTest {
         assertEquals(1, view.countdownStopCalls);
     }
 
+    @Test
+    void manualSubmitRunsOffUiThreadThenLocksUiAndStopsTimer() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        QueuedExecutor network = new QueuedExecutor();
+        ExamUiController controller = controller(gateway, view, network);
+
+        controller.submit();
+
+        assertFalse(view.answeringEnabled);
+        assertFalse(view.submitEnabled);
+        assertEquals(SubmissionDisplayStatus.SUBMITTING, view.submissionStatus);
+        assertEquals(0, gateway.submitCalls);
+        assertEquals(ClientState.SUBMITTING, gateway.state());
+        controller.refreshConnectionState();
+        assertFalse(view.answeringEnabled);
+        assertFalse(view.submitEnabled);
+
+        network.runNext();
+        assertEquals(1, gateway.submitCalls);
+        gateway.completeManualSubmit();
+
+        assertEquals(SubmissionDisplayStatus.SUBMITTED, view.submissionStatus);
+        assertEquals(1, view.countdownStopCalls);
+        assertFalse(view.submitEnabled);
+    }
+
+    @Test
+    void autoSubmitPushLocksUiAndStopsTimer() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        ExamUiController controller = controller(gateway, view, Runnable::run);
+
+        gateway.pushAutoSubmit();
+
+        assertEquals(SubmissionDisplayStatus.AUTO_SUBMITTED, view.submissionStatus);
+        assertEquals(1, view.countdownStopCalls);
+        assertFalse(view.answeringEnabled);
+        assertFalse(view.submitEnabled);
+    }
+
+    @Test
+    void submitTimeoutShowsRetryableStateAndEnablesSameLogicalRetry() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        ExamUiController controller = controller(gateway, view, Runnable::run);
+
+        controller.submit();
+        gateway.failSubmit(new TimeoutException("timed out"));
+
+        assertEquals(SubmissionDisplayStatus.RETRYABLE_ERROR, view.submissionStatus);
+        assertTrue(view.submissionDetail.contains("giữ nguyên yêu cầu"));
+        assertTrue(view.submitEnabled);
+        assertFalse(view.answeringEnabled);
+    }
+
+    @Test
+    void immediateSubmitKeepsQueuedSelectionAndPollingCannotUnlockIt() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        QueuedExecutor network = new QueuedExecutor();
+        ExamUiController controller = controller(gateway, view, network);
+        controller.selectAnswer("Q1", "Q1-A");
+        controller.submit();
+        controller.selectAnswer("Q1", "Q1-B");
+        controller.refreshConnectionState();
+        assertEquals("Q1-A", gateway.snapshot().answers().get("Q1").selectedOptionId());
+        assertEquals(1, gateway.snapshot().answers().get("Q1").localVersion());
+        assertEquals(SubmissionDisplayStatus.SYNCHRONIZING, view.submissionStatus);
+        assertFalse(view.answeringEnabled);
+        assertFalse(view.submitEnabled);
+        network.runNext(); // Queued answer send is now owned by submit's flush.
+        assertEquals(0, gateway.updateCalls);
+        network.runNext();
+        controller.refreshConnectionState();
+        assertEquals(SubmissionDisplayStatus.SUBMITTING, view.submissionStatus);
+        assertEquals(1, gateway.submitCalls);
+    }
+
+    @Test
+    void lateFailureCannotOverwriteAutoSubmitAndDuplicatePushStopsTimerOnce() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        ExamUiController controller = controller(gateway, view, Runnable::run);
+        controller.submit();
+        gateway.pushAutoSubmit();
+        gateway.submitFuture.completeExceptionally(new TimeoutException("Late error"));
+        gateway.pushAutoSubmit();
+        controller.refreshConnectionState();
+        assertEquals(SubmissionDisplayStatus.AUTO_SUBMITTED, view.submissionStatus);
+        assertEquals(1, view.countdownStopCalls);
+        assertFalse(view.answeringEnabled);
+        assertFalse(view.submitEnabled);
+    }
+
+    @Test
+    void synchronizationFailureShowsExplicitMessageAndNeverSuccess() {
+        FakeGateway gateway = new FakeGateway(snapshot(false));
+        gateway.state = ClientState.ACTIVE;
+        FakeView view = new FakeView();
+        ExamUiController controller = controller(gateway, view, Runnable::run);
+        controller.submit();
+        gateway.failSubmit(new IOException("Lost connection"));
+        assertEquals(SubmissionDisplayStatus.RETRYABLE_ERROR, view.submissionStatus);
+        assertTrue(view.submissionDetail.contains("chưa được xác nhận"));
+        assertEquals(0, view.countdownStopCalls);
+    }
+
     private static ExamUiController controller(
             FakeGateway gateway,
             FakeView view,
@@ -209,10 +325,16 @@ class ExamUiControllerTest {
         private int connectAttemptsAfterConstruction;
         private int updateCalls;
         private int closeCalls;
+        private int submitCalls;
+        private boolean submitRetryAvailable;
+        private boolean submitRequestSent;
         private String candidateId;
         private String examId;
         private String updatedQuestionId;
         private String updatedOptionId;
+        private CompletableFuture<ExamSubmission> submitFuture;
+        private Consumer<ExamSubmission> submissionHandler = submission -> {
+        };
 
         private FakeGateway(ClientExamState examState) {
             this.examState = examState;
@@ -238,14 +360,70 @@ class ExamUiControllerTest {
 
         @Override
         public CompletableFuture<AnswerDraft> updateAnswer(String questionId, String optionId) {
-            updateCalls++;
+            selectAnswer(questionId, optionId);
+            return sendAnswerUpdate(questionId);
+        }
+
+        @Override
+        public AnswerDraft selectAnswer(String questionId, String optionId) {
+            if (state != ClientState.ACTIVE) {
+                throw new IllegalStateException("Exam is not active");
+            }
             updatedQuestionId = questionId;
             updatedOptionId = optionId;
-            examState.selectAnswer(questionId, optionId);
+            return examState.selectAnswer(questionId, optionId);
+        }
+
+        @Override
+        public CompletableFuture<AnswerDraft> sendAnswerUpdate(String questionId) {
+            updateCalls++;
+            updatedQuestionId = questionId;
             pendingAnswer = examState.prepareAnswerUpdate(questionId);
             inFlight = true;
             answerFuture = new CompletableFuture<>();
             return answerFuture;
+        }
+
+        @Override
+        public void beginSubmission() {
+            state = ClientState.SUBMITTING;
+        }
+
+        @Override
+        public boolean submitRequestSent() {
+            return submitRequestSent;
+        }
+
+        @Override
+        public CompletableFuture<ExamSubmission> submitExam() {
+            submitCalls++;
+            state = ClientState.SUBMITTING;
+            submitRetryAvailable = false;
+            submitRequestSent = true;
+            submitFuture = new CompletableFuture<>();
+            return submitFuture;
+        }
+
+        private void completeManualSubmit() {
+            ExamSubmission submission = new ExamSubmission(
+                    "SESSION-001", ClientState.SUBMITTED, 1_790_800_100_000L
+            );
+            state = ClientState.SUBMITTED;
+            submitFuture.complete(submission);
+        }
+
+        private void failSubmit(Throwable error) {
+            state = ClientState.SUBMITTING;
+            submitRetryAvailable = true;
+            submitFuture.completeExceptionally(error);
+        }
+
+        private void pushAutoSubmit() {
+            ExamSubmission submission = new ExamSubmission(
+                    "SESSION-001", ClientState.AUTO_SUBMITTED, 1_790_800_100_000L
+            );
+            state = ClientState.AUTO_SUBMITTED;
+            submissionHandler.accept(submission);
         }
 
         private void completeAnswerUpdate() {
@@ -275,6 +453,16 @@ class ExamUiControllerTest {
         }
 
         @Override
+        public boolean submitRetryAvailable() {
+            return submitRetryAvailable;
+        }
+
+        @Override
+        public void setSubmissionHandler(Consumer<ExamSubmission> handler) {
+            submissionHandler = handler;
+        }
+
+        @Override
         public void close() throws IOException {
             closeCalls++;
             state = ClientState.CLOSED;
@@ -288,6 +476,9 @@ class ExamUiControllerTest {
         private ClientExamState.Snapshot exam;
         private ConnectionDisplayStatus connectionStatus;
         private int countdownStopCalls;
+        private boolean submitEnabled;
+        private SubmissionDisplayStatus submissionStatus;
+        private String submissionDetail;
         private final Map<String, AnswerDisplayStatus> answerStatuses = new java.util.HashMap<>();
         private final Map<String, AnswerDraft> answers = new java.util.HashMap<>();
 
@@ -330,6 +521,17 @@ class ExamUiControllerTest {
         @Override
         public void setAnsweringEnabled(boolean enabled) {
             answeringEnabled = enabled;
+        }
+
+        @Override
+        public void setSubmitEnabled(boolean enabled) {
+            submitEnabled = enabled;
+        }
+
+        @Override
+        public void showSubmissionStatus(SubmissionDisplayStatus status, String detail) {
+            submissionStatus = status;
+            submissionDetail = detail;
         }
     }
 
